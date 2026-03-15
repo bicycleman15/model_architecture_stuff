@@ -26,7 +26,7 @@ class Config:
     n_decoder_layers: int = 4
 
     # compressor
-    compress_threshold: float = 0.5
+    gumbel_tau: float = 1.0
 
     # processor: None = flat transformer blocks, or a Config for recursive nesting
     processor_config: Optional['Config'] = None
@@ -57,7 +57,7 @@ class Compressor(nn.Module):
     def __init__(self, config):
         super().__init__()
         self.config = config
-        self.threshold = config.compress_threshold
+        self.tau = config.gumbel_tau
 
         self.layers = nn.ModuleList(
             TransformerBlock(config) for _ in range(config.n_compressor_layers)
@@ -70,32 +70,46 @@ class Compressor(nn.Module):
             nn.Linear(config.dim, 1),
         )
 
+    def gumbel_sigmoid(self, logits):
+        # Gumbel-Sigmoid (Binary Concrete) with straight-through estimator
+        if self.training:
+            u = torch.rand_like(logits).clamp(1e-6, 1 - 1e-6)
+            gumbel_noise = torch.log(u) - torch.log(1 - u)
+            soft = torch.sigmoid((logits + gumbel_noise) / self.tau)
+        else:
+            soft = torch.sigmoid(logits)
+
+        hard = (soft > 0.5).float()
+        # straight-through: hard in forward, soft in backward
+        return hard - soft.detach() + soft
+
     def chunk_and_compress(self, x):
         # x: [B, L, D]
         B, L, D = x.shape
 
-        probs = torch.sigmoid(self.should_chunk_mlp(x).squeeze(-1))  # [B, L]
-        mask = probs > self.threshold  # [B, L]
+        logits = self.should_chunk_mlp(x).squeeze(-1)  # [B, L]
+        gate = self.gumbel_sigmoid(logits)  # [B, L], 0/1 forward, differentiable backward
 
-        # different batch elements can have different numbers of boundaries
+        # gate the input so selected positions carry STE gradients
+        gated_x = x * gate.unsqueeze(-1)  # [B, L, D]
+
+        mask = gate > 0.5  # [B, L] hard boolean for indexing
+
         counts = mask.sum(dim=-1)  # [B]
         K = counts.max().item()
 
-        # pad boundaries and compressed_x to max K across the batch
         boundaries = torch.zeros(B, K, dtype=torch.long, device=x.device)
         compressed_x = torch.zeros(B, K, D, device=x.device, dtype=x.dtype)
 
         for b in range(B):
-            idx = mask[b].nonzero(as_tuple=False).squeeze(-1)  # [n_b] -- indices for b^{th} sequence where the compressor decided to chunk
+            idx = mask[b].nonzero(as_tuple=False).squeeze(-1)
             n = idx.shape[0]
             boundaries[b, :n] = idx
-            compressed_x[b, :n] = x[b, idx]
-            # pad remaining boundary slots with seq_len so they produce zero-size chunks
-            # rest of the compressed_x is zero vector
+            compressed_x[b, :n] = gated_x[b, idx]
             if n < K:
                 boundaries[b, n:] = L
 
-        return compressed_x, boundaries, probs, counts
+        return compressed_x, boundaries, gate, counts
 
     def forward(self, x, cos, sin):
         # x: [B, L, D]
