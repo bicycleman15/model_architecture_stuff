@@ -2,6 +2,11 @@ import torch
 import torch.nn as nn
 
 
+class TransformerBlock:
+    # used as layers
+    pass
+
+
 class Compressor:
     # compressor "implicitly" decides how to chunk up the sequence
     # it acts as a router
@@ -26,7 +31,6 @@ class Compressor:
 
         return compressed_x, boundaries, probs
 
-
     def forward(self, x):
         # x: [B, L, D]
 
@@ -39,15 +43,40 @@ class Compressor:
         return x, compressed_x, boundaries
         
 
-
 class Decoder:
     # decoder decodes compressed chunks back to tokens
-    pass
+    def __init__(self, config):
+        pass
+
+    def forward(self, x_processed, boundaries):
+        # x_processed: [B, K, D]
+        # boundaries: [B, K]
+
+        # somehow get array of how many tokens we need to up-project to
+        chunk_sizes = boundaries[:, 1:] - boundaries[:, :-1] # [B, K]
+
+        # now for every position for x_processed[i], we need to up-project to chunk_sizes[i]
+        # not sure how to do this without a for loop
+        # lets do a for loop for now
+        
+        x = list()
+        for i in range(x_processed.shape[1]):
+            # let's use a linear interpolation here
+            x.append(x_processed[:, i, :] @ torch.linear_interpolate(self.up_project_matrix, (dim, chunk_sizes[i] * dim)))
+
+        # now we can concat everything
+        x = torch.cat(x, dim=1) # [B, L, D]
+
+        # now pass x through some layers :)
+        for layer in self.layers:
+            x = layer(x)
+
+        return x
 
 
 class Processor:
     # processor processes compressed chunks
-    pass
+    # nothing fancy here tbh, just some layers doing some processing of the sequence
 
 
 class HierarchicalModel(nn.Module):
@@ -74,7 +103,7 @@ class HierarchicalModel(nn.Module):
         x_processed = self.processor(x_compressed)
 
         # in decoder, we need to somehow up-project this back to original sequence length
-        out = self.decoder(x_compressed, boundaries) # [B, L, D]
+        out = self.decoder(x_processed, boundaries) # [B, L, D]
 
         # project to vocab
         logits = self.vocab(out) # [B, L, D] -> [B, L, V]
