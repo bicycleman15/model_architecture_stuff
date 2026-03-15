@@ -72,15 +72,30 @@ class Compressor(nn.Module):
 
     def chunk_and_compress(self, x):
         # x: [B, L, D]
+        B, L, D = x.shape
 
         probs = torch.sigmoid(self.should_chunk_mlp(x).squeeze(-1))  # [B, L]
+        mask = probs > self.threshold  # [B, L]
 
-        boundaries = torch.where(probs > self.threshold, dim=-1)  # [B, K]
+        # different batch elements can have different numbers of boundaries
+        counts = mask.sum(dim=-1)  # [B]
+        K = counts.max().item()
 
-        # "compress" by picking up representations at boundary positions
-        compressed_x = x[boundaries]  # [B, K, D] hopefully!
+        # pad boundaries and compressed_x to max K across the batch
+        boundaries = torch.zeros(B, K, dtype=torch.long, device=x.device)
+        compressed_x = torch.zeros(B, K, D, device=x.device, dtype=x.dtype)
 
-        return compressed_x, boundaries, probs
+        for b in range(B):
+            idx = mask[b].nonzero(as_tuple=False).squeeze(-1)  # [n_b] -- indices for b^{th} sequence where the compressor decided to chunk
+            n = idx.shape[0]
+            boundaries[b, :n] = idx
+            compressed_x[b, :n] = x[b, idx]
+            # pad remaining boundary slots with seq_len so they produce zero-size chunks
+            # rest of the compressed_x is zero vector
+            if n < K:
+                boundaries[b, n:] = L
+
+        return compressed_x, boundaries, probs, counts
 
     def forward(self, x, cos, sin):
         # x: [B, L, D]
@@ -89,9 +104,9 @@ class Compressor(nn.Module):
             x = layer(x, cos, sin)
         x = self.norm(x)
 
-        compressed_x, boundaries, probs = self.chunk_and_compress(x)
+        compressed_x, boundaries, probs, counts = self.chunk_and_compress(x)
 
-        return x, compressed_x, boundaries
+        return x, compressed_x, boundaries, counts
         
 
 class Decoder(nn.Module):
@@ -105,23 +120,27 @@ class Decoder(nn.Module):
         )
         self.norm = RMSNorm(config.dim, eps=config.norm_eps)
 
-    def forward(self, x_processed, boundaries, x_residual, cos, sin, seq_len):
+    def forward(self, x_processed, boundaries, counts, x_residual, cos, sin, seq_len):
         # x_processed: [B, K, D]
-        # boundaries: [B, K] — positions in [0, seq_len) where we placed boundaries
+        # boundaries: [B, K] — positions in [0, seq_len), padded with seq_len for invalid slots
+        # counts: [B] — actual number of valid boundaries per batch element
         # x_residual: [B, L, D] — full-length output from compressor
         B, K, D = x_processed.shape
 
         # expand each compressed token back to its chunk of the original sequence
         # token 0 covers [0, boundaries[1])
         # token i covers [boundaries[i], boundaries[i+1])
-        # token K-1 covers [boundaries[K-1], seq_len)
+        # last valid token covers [boundaries[n-1], seq_len)
         batch_expanded = []
         for b in range(B):
+            n = counts[b].item()
             chunks = []
-            for i in range(K):
+            for i in range(n):
                 start = 0 if i == 0 else boundaries[b, i].item()
-                end = seq_len if i == K - 1 else boundaries[b, i + 1].item()
+                end = seq_len if i == n - 1 else boundaries[b, i + 1].item()
                 chunk_size = end - start
+                # note that chunks having chunk size as zero (i.e. the padded compressed_x) will produce empty chunks
+                # so everything would work out when we torch.cat()-- it will equal to L (sequence length)
                 chunks.append(einops.repeat(x_processed[b, i], 'd -> c d', c=chunk_size))
             batch_expanded.append(torch.cat(chunks, dim=0))  # [L, D]
         x = torch.stack(batch_expanded, dim=0)  # [B, L, D]
@@ -209,11 +228,11 @@ class HierarchicalModel(nn.Module):
         cos = self.cos[:, :L]
         sin = self.sin[:, :L]
 
-        x, x_compressed, boundaries = self.compressor(x, cos, sin)
+        x, x_compressed, boundaries, counts = self.compressor(x, cos, sin)
 
         x_processed = self.processor(x_compressed)
 
-        out = self.decoder(x_processed, boundaries, x, cos, sin, L)
+        out = self.decoder(x_processed, boundaries, counts, x, cos, sin, L)
 
         return out
 
@@ -237,3 +256,22 @@ class HierarchicalLM(nn.Module):
         out = self.model(x)  # [B, L, D]
         logits = self.vocab(out)  # [B, L, V]
         return logits
+
+
+if __name__ == "__main__":
+
+    config = Config()
+
+    model = HierarchicalLM(config)
+
+    print(model)
+
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    model = model.to(device)
+    model.setup_cache(device=device)
+
+    input_ids = torch.randint(0, config.vocab_size, (2, 128), device=device)
+    print("input_ids.shape:", input_ids.shape)
+
+    logits = model(input_ids)
+    print("logits.shape:", logits.shape)
