@@ -27,6 +27,7 @@ class Config:
 
     # compressor
     gumbel_tau: float = 1.0
+    max_chunk_size: int = 16
 
     # processor: None = flat transformer blocks, or a Config for recursive nesting
     processor_config: Optional['Config'] = None
@@ -83,6 +84,40 @@ class Compressor(nn.Module):
         # straight-through: hard in forward, soft in backward
         return hard - soft.detach() + soft
 
+    def _enforce_max_chunk_size(self, sampled_idx, seq_len):
+        """Insert forced boundaries so no decoder chunk exceeds max_chunk_size.
+
+        The decoder assigns chunks as:
+          token 0:     [0, boundaries[0])                    size = boundaries[0]
+          token i:     [boundaries[i-1], boundaries[i])      size = boundaries[i] - boundaries[i-1]
+          token K-1:   [boundaries[K-2], seq_len)            size = seq_len - boundaries[K-2]
+        """
+        M = self.config.max_chunk_size
+        result = list(sampled_idx.tolist())
+
+        # guarantee at least one boundary so the loop has something to work with
+        if not result:
+            result.append(min(M, seq_len - 1))
+
+        # iteratively insert forced boundaries until all chunks are within M
+        changed = True
+        while changed:
+            changed = False
+            result = sorted(set(result))
+            K = len(result)
+            insertions = []
+            for i in range(K):
+                start = 0 if i == 0 else result[i - 1]
+                end = result[i] if i < K - 1 else seq_len
+                chunk_size = end - start
+                if chunk_size > M:
+                    insertions.append(start + M)
+                    changed = True
+            result.extend(insertions)
+
+        result = sorted(set(result))
+        return torch.tensor(result, dtype=torch.long, device=sampled_idx.device)
+
     def chunk_and_compress(self, x):
         # x: [B, L, D]
         B, L, D = x.shape
@@ -95,17 +130,28 @@ class Compressor(nn.Module):
 
         mask = gate > 0.5  # [B, L] hard boolean for indexing
 
-        counts = mask.sum(dim=-1)  # [B]
-        K = counts.max().item()
+        # per-batch: collect sampled boundaries, enforce max chunk size, gather tokens
+        all_idx = []
+        for b in range(B):
+            sampled_idx = mask[b].nonzero(as_tuple=False).squeeze(-1)
+            idx = self._enforce_max_chunk_size(sampled_idx, L)
+            all_idx.append(idx)
 
+        K = max(idx.shape[0] for idx in all_idx)
+        counts = torch.zeros(B, dtype=torch.long, device=x.device)
         boundaries = torch.zeros(B, K, dtype=torch.long, device=x.device)
         compressed_x = torch.zeros(B, K, D, device=x.device, dtype=x.dtype)
 
         for b in range(B):
-            idx = mask[b].nonzero(as_tuple=False).squeeze(-1)
+            idx = all_idx[b]
             n = idx.shape[0]
+            counts[b] = n
             boundaries[b, :n] = idx
-            compressed_x[b, :n] = gated_x[b, idx]
+            # forced boundaries use x directly (no STE gate); sampled ones use gated_x
+            is_sampled = mask[b][idx]
+            compressed_x[b, :n] = torch.where(
+                is_sampled.unsqueeze(-1), gated_x[b, idx], x[b, idx]
+            )
             if n < K:
                 boundaries[b, n:] = L
 
@@ -142,19 +188,17 @@ class Decoder(nn.Module):
         B, K, D = x_processed.shape
 
         # expand each compressed token back to its chunk of the original sequence
-        # token 0 covers [0, boundaries[1])
-        # token i covers [boundaries[i], boundaries[i+1])
-        # last valid token covers [boundaries[n-1], seq_len)
+        # token i covers [boundaries[i-1], boundaries[i])  (boundary = chunk end)
+        # token 0 covers [0, boundaries[0])
+        # token K-1 covers [boundaries[K-2], seq_len)  (absorbs the tail)
         batch_expanded = []
         for b in range(B):
             n = counts[b].item()
             chunks = []
             for i in range(n):
-                start = 0 if i == 0 else boundaries[b, i].item()
-                end = seq_len if i == n - 1 else boundaries[b, i + 1].item()
+                start = 0 if i == 0 else boundaries[b, i - 1].item()
+                end = boundaries[b, i].item() if i < n - 1 else seq_len
                 chunk_size = end - start
-                # note that chunks having chunk size as zero (i.e. the padded compressed_x) will produce empty chunks
-                # so everything would work out when we torch.cat()-- it will equal to L (sequence length)
                 chunks.append(einops.repeat(x_processed[b, i], 'd -> c d', c=chunk_size))
             batch_expanded.append(torch.cat(chunks, dim=0))  # [L, D]
         x = torch.stack(batch_expanded, dim=0)  # [B, L, D]
