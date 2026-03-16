@@ -14,16 +14,16 @@ class Config:
     padded_vocab_size: Optional[int] = None
 
     # shared transformer dimensions
-    dim: int = 768
-    n_head: int = 12
+    dim: int = 512
+    n_head: int = 8
     n_local_heads: int = -1
     head_dim: Optional[int] = None
     intermediate_size: Optional[int] = None
 
     # per-stage layer counts
-    n_compressor_layers: int = 4
-    n_processor_layers: int = 8
-    n_decoder_layers: int = 4
+    n_compressor_layers: int = 3
+    n_processor_layers: int = 6
+    n_decoder_layers: int = 3
 
     # compressor
     gumbel_tau: float = 1.0
