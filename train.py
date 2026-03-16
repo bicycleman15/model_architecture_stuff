@@ -7,8 +7,10 @@ import torch
 import torch.nn.functional as F
 import wandb
 
+from transformers import AutoTokenizer
+
 from hnet import HierarchicalLM, Config
-from utils import CycleIterator, validate, get_lr, num_parameters, seed_everything
+from utils import CycleIterator, validate, get_lr, num_parameters, seed_everything, visualize_boundaries
 
 
 @dataclass
@@ -81,6 +83,9 @@ def main():
     )
     train_iterator = CycleIterator(train_loader)
 
+    # tokenizer (for boundary visualization)
+    tokenizer = AutoTokenizer.from_pretrained(cfg.tokenizer_name)
+
     # model
     model_config = Config(
         vocab_size=cfg.vocab_size,
@@ -115,7 +120,7 @@ def main():
         for pg in optimizer.param_groups:
             pg["lr"] = lr
 
-        logits = model(input_ids)
+        logits, avg_chunk_size = model(input_ids)
         loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.view(-1))
         (loss / cfg.grad_accum).backward()
 
@@ -124,8 +129,11 @@ def main():
                 torch.nn.utils.clip_grad_norm_(model.parameters(), cfg.grad_norm)
             optimizer.step()
 
-        bar.set_postfix_str(f"loss={loss.item():.4f} lr={lr:.6f}")
-        wandb.log({"train/loss": loss.item(), "train/lr": lr})
+        bar.set_postfix_str(f"loss={loss.item():.4f} lr={lr:.6f} avg_chunk_size={avg_chunk_size:.1f}")
+        wandb.log({"train/loss": loss.item(), "train/lr": lr, "train/avg_chunk_size": avg_chunk_size})
+
+        # if step % 25 == 0:
+        #     visualize_boundaries(model, input_ids, tokenizer)
 
         # eval
         if step > 0 and step % cfg.eval_interval == 0:

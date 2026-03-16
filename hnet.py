@@ -27,7 +27,7 @@ class Config:
 
     # compressor
     gumbel_tau: float = 1.0
-    max_chunk_size: int = 16
+    max_chunk_size: int = 128
 
     # processor: None = flat transformer blocks, or a Config for recursive nesting
     processor_config: Optional['Config'] = None
@@ -162,7 +162,9 @@ class Compressor(nn.Module):
 
         compressed_x, boundaries, probs, counts = self.chunk_and_compress(x)
 
-        return x, compressed_x, boundaries, counts
+        avg_chunk_size = x.shape[1] / counts.float().mean().item()
+
+        return x, compressed_x, boundaries, counts, avg_chunk_size
         
 
 class Decoder(nn.Module):
@@ -285,13 +287,13 @@ class HierarchicalModel(nn.Module):
         cos = self.cos[:, :L]
         sin = self.sin[:, :L]
 
-        x, x_compressed, boundaries, counts = self.compressor(x, cos, sin)
+        x, x_compressed, boundaries, counts, avg_chunk_size = self.compressor(x, cos, sin)
 
         x_processed = self.processor(x_compressed)
 
         out = self.decoder(x_processed, boundaries, counts, x, cos, sin, L)
 
-        return out
+        return out, avg_chunk_size
 
 
 class HierarchicalLM(nn.Module):
@@ -310,9 +312,9 @@ class HierarchicalLM(nn.Module):
 
     def forward(self, input_ids):
         x = self.emb(input_ids)  # [B, L, D]
-        out = self.model(x)  # [B, L, D]
+        out, avg_chunk_size = self.model(x)  # [B, L, D]
         logits = self.vocab(out)  # [B, L, V]
-        return logits
+        return logits, avg_chunk_size
 
 
 if __name__ == "__main__":
@@ -330,5 +332,6 @@ if __name__ == "__main__":
     input_ids = torch.randint(0, config.vocab_size, (2, 128), device=device)
     print("input_ids.shape:", input_ids.shape)
 
-    logits = model(input_ids)
+    logits, avg_chunk_size = model(input_ids)
     print("logits.shape:", logits.shape)
+    print("avg_chunk_size:", avg_chunk_size)

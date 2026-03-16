@@ -11,6 +11,31 @@ from tqdm import tqdm
 
 
 @torch.no_grad()
+def visualize_boundaries(model, input_ids, tokenizer, n=1):
+    """Show how the compressor chunks a sample, using | as delimiters."""
+    model.eval()
+    x = model.emb(input_ids[:n])
+    B, L, D = x.shape
+    cos = model.model.cos[:, :L]
+    sin = model.model.sin[:, :L]
+    _, _, boundaries, counts, _ = model.model.compressor(x, cos, sin)
+
+    for b in range(n):
+        tokens = tokenizer.convert_ids_to_tokens(input_ids[b].tolist())
+        nc = counts[b].item()
+        bnd = set(boundaries[b, :nc].tolist())
+
+        parts = []
+        for i, tok in enumerate(tokens):
+            parts.append(tok)
+            if i in bnd and i < L - 1:
+                parts.append("|")
+        print(f"[boundaries] chunks={nc}  {''.join(parts)}")
+
+    model.train()
+
+
+@torch.no_grad()
 def validate(model, val_dataloader, device):
     model.eval()
     total_loss = 0.0
@@ -19,7 +44,8 @@ def validate(model, val_dataloader, device):
     for input_ids, targets in tqdm(val_dataloader, desc="Evaluating"):
         input_ids, targets = input_ids.to(device), targets.to(device)
         num_tokens = (targets != -100).sum().item()
-        loss = model(input_ids, targets)
+        logits, _ = model(input_ids)
+        loss = torch.nn.functional.cross_entropy(logits.view(-1, logits.size(-1)), targets.view(-1))
         total_loss += loss.item() * num_tokens
         total_tokens += num_tokens
 
