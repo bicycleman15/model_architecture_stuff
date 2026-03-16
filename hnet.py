@@ -87,35 +87,30 @@ class Compressor(nn.Module):
     def _enforce_max_chunk_size(self, sampled_idx, seq_len):
         """Insert forced boundaries so no decoder chunk exceeds max_chunk_size.
 
-        The decoder assigns chunks as:
-          token 0:     [0, boundaries[0])                    size = boundaries[0]
-          token i:     [boundaries[i-1], boundaries[i])      size = boundaries[i] - boundaries[i-1]
-          token K-1:   [boundaries[K-2], seq_len)            size = seq_len - boundaries[K-2]
+        boundaries[i] = last position (inclusive) of chunk i.
+          chunk 0:   [0,                   boundaries[0]]   size = boundaries[0] + 1
+          chunk i:   [boundaries[i-1] + 1, boundaries[i]]   size = boundaries[i] - boundaries[i-1]
+          chunk K-1: [boundaries[K-2] + 1, boundaries[K-1]] size = boundaries[K-1] - boundaries[K-2]
+
+        boundaries[-1] is always seq_len - 1 so the full sequence is covered.
         """
         M = self.config.max_chunk_size
-        result = list(sampled_idx.tolist())
+        points = sorted(set(sampled_idx.tolist()))
 
-        # guarantee at least one boundary so the loop has something to work with
-        if not result:
-            result.append(min(M, seq_len - 1))
+        # Always include seq_len - 1 so the last chunk covers the tail
+        points.append(seq_len - 1)
+        points = sorted(set(points))
 
-        # iteratively insert forced boundaries until all chunks are within M
-        changed = True
-        while changed:
-            changed = False
-            result = sorted(set(result))
-            K = len(result)
-            insertions = []
-            for i in range(K):
-                start = 0 if i == 0 else result[i - 1]
-                end = result[i] if i < K - 1 else seq_len
-                chunk_size = end - start
-                if chunk_size > M:
-                    insertions.append(start + M)
-                    changed = True
-            result.extend(insertions)
+        # Single pass: fill gaps > M (prev = -1 represents "before position 0")
+        result = []
+        prev = -1
+        for pos in points:
+            while pos - prev > M:
+                prev += M
+                result.append(prev)
+            result.append(pos)
+            prev = pos
 
-        result = sorted(set(result))
         return torch.tensor(result, dtype=torch.long, device=sampled_idx.device)
 
     def chunk_and_compress(self, x):
@@ -130,7 +125,8 @@ class Compressor(nn.Module):
 
         mask = gate > 0.5  # [B, L] hard boolean for indexing
 
-        # per-batch: collect sampled boundaries, enforce max chunk size, gather tokens
+        # per-batch: collect sampled positions, enforce max chunk size, gather tokens
+        # boundaries[i] = last position (inclusive) of chunk i
         all_idx = []
         for b in range(B):
             sampled_idx = mask[b].nonzero(as_tuple=False).squeeze(-1)
@@ -175,6 +171,8 @@ class Decoder(nn.Module):
         super().__init__()
         self.config = config
 
+        self.start_emb = nn.Embedding(1, config.dim)
+
         self.layers = nn.ModuleList(
             TransformerBlock(config) for _ in range(config.n_decoder_layers)
         )
@@ -182,34 +180,35 @@ class Decoder(nn.Module):
 
     def forward(self, x_processed, boundaries, counts, x_residual, cos, sin, seq_len):
         # x_processed: [B, K, D]
-        # boundaries: [B, K] — positions in [0, seq_len), padded with seq_len for invalid slots
+        # boundaries: [B, K] — last position (inclusive) of each chunk, boundaries[-1] = seq_len - 1
         # counts: [B] — actual number of valid boundaries per batch element
         # x_residual: [B, L, D] — full-length output from compressor
         B, K, D = x_processed.shape
 
-        # expand each compressed token back to its chunk of the original sequence
-        # token i covers [boundaries[i-1], boundaries[i])  (boundary = chunk end)
-        # token 0 covers [0, boundaries[0])
-        # token K-1 covers [boundaries[K-2], seq_len)  (absorbs the tail)
+        # Causal chunk shift: processor output for chunk i is used to decode chunk i+1.
+        # chunk 0 positions: learnable start embedding (no previous chunk)
+        # chunk i positions: processor output for chunk i-1 (summary of chunks 0..i-1)
         batch_expanded = []
         for b in range(B):
             n = counts[b].item()
             chunks = []
             for i in range(n):
-                start = 0 if i == 0 else boundaries[b, i - 1].item()
-                end = boundaries[b, i].item() if i < n - 1 else seq_len
+                start = 0 if i == 0 else boundaries[b, i - 1].item() + 1
+                end = boundaries[b, i].item() + 1
                 chunk_size = end - start
-                chunks.append(einops.repeat(x_processed[b, i], 'd -> c d', c=chunk_size))
+                if i == 0:
+                    rep = self.start_emb.weight[0]
+                else:
+                    rep = x_processed[b, i - 1]
+                # expand previous chunk representations to current chunk_size and then
+                # add in with the current chunk's representations coming from the compressor
+                chunks.append(einops.repeat(rep, 'd -> c d', c=chunk_size))
             batch_expanded.append(torch.cat(chunks, dim=0))  # [L, D]
         x = torch.stack(batch_expanded, dim=0)  # [B, L, D]
 
-        # the expanded compressed tokens (i.e. `x` above) are identical within each chunk
-        # so the decoder would have no way to know what the previous token was
-        # decoder needs this since there can stochasty in decoding, and it must know what token
-        # before is to accurately decode the current token
-        # Adding the compressor's full-length output as a residual
-        # provides this info about previous token without requiring input_ids
-        # everything in compressor/processor/decoder should operate purely on embeddings only
+        # The expanded chunk representations are identical within each chunk.
+        # Adding the compressor's full-length residual provides per-position
+        # context so the decoder can distinguish individual token positions.
         x = x + x_residual
 
         for layer in self.layers:
