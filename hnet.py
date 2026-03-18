@@ -71,87 +71,35 @@ class Compressor(nn.Module):
             nn.Linear(config.dim, 1),
         )
 
-    def gumbel_sigmoid(self, logits):
-        # Gumbel-Sigmoid (Binary Concrete) with straight-through estimator
-        if self.training:
-            u = torch.rand_like(logits).clamp(1e-6, 1 - 1e-6)
-            gumbel_noise = torch.log(u) - torch.log(1 - u)
-            soft = torch.sigmoid((logits + gumbel_noise) / self.tau)
-        else:
-            soft = torch.sigmoid(logits)
-
-        hard = (soft > 0.5).float()
-        # straight-through: hard in forward, soft in backward
-        return hard - soft.detach() + soft
-
-    def _enforce_max_chunk_size(self, sampled_idx, seq_len):
-        """Insert forced boundaries so no decoder chunk exceeds max_chunk_size.
-
-        boundaries[i] = last position (inclusive) of chunk i.
-          chunk 0:   [0,                   boundaries[0]]   size = boundaries[0] + 1
-          chunk i:   [boundaries[i-1] + 1, boundaries[i]]   size = boundaries[i] - boundaries[i-1]
-          chunk K-1: [boundaries[K-2] + 1, boundaries[K-1]] size = boundaries[K-1] - boundaries[K-2]
-
-        boundaries[-1] is always seq_len - 1 so the full sequence is covered.
-        """
-        M = self.config.max_chunk_size
-        points = sorted(set(sampled_idx.tolist()))
-
-        # Always include seq_len - 1 so the last chunk covers the tail
-        points.append(seq_len - 1)
-        points = sorted(set(points))
-
-        # Single pass: fill gaps > M (prev = -1 represents "before position 0")
-        result = []
-        prev = -1
-        for pos in points:
-            while pos - prev > M:
-                prev += M
-                result.append(prev)
-            result.append(pos)
-            prev = pos
-
-        return torch.tensor(result, dtype=torch.long, device=sampled_idx.device)
-
     def chunk_and_compress(self, x):
         # x: [B, L, D]
         B, L, D = x.shape
 
         logits = self.should_chunk_mlp(x).squeeze(-1)  # [B, L]
-        gate = self.gumbel_sigmoid(logits)  # [B, L], 0/1 forward, differentiable backward
+        
+        probs = torch.sigmoid(logits) # [B, L]
 
-        # gate the input so selected positions carry STE gradients
-        gated_x = x * gate.unsqueeze(-1)  # [B, L, D]
+        # hard boundary decisions: 1 = chunk ends at this position
+        boundaries_mask = probs + ((probs > 0.5).float() - probs).detach()  # [B, L]
+        boundaries_mask[:, -1] = 1.0  # force last position to be a boundary
 
-        mask = gate > 0.5  # [B, L] hard boolean for indexing
+        counts = boundaries_mask.sum(dim=-1).long()  # [B] number of segments
+        S = counts.max().item()
 
-        # per-batch: collect sampled positions, enforce max chunk size, gather tokens
-        # boundaries[i] = last position (inclusive) of chunk i
-        all_idx = []
-        for b in range(B):
-            sampled_idx = mask[b].nonzero(as_tuple=False).squeeze(-1)
-            idx = self._enforce_max_chunk_size(sampled_idx, L)
-            all_idx.append(idx)
+        # use detached cumsum to figure out which segment each boundary belongs to
+        cumsum = torch.cumsum(boundaries_mask.detach(), dim=-1)  # [B, L]
+        segment_indices = torch.arange(1, S + 1, device=x.device).view(1, S, 1)  # [1, S, 1]
+        assignment = (cumsum.unsqueeze(1) == segment_indices).float()  # [B, S, L]
 
-        K = max(idx.shape[0] for idx in all_idx)
-        counts = torch.zeros(B, dtype=torch.long, device=x.device)
-        boundaries = torch.zeros(B, K, dtype=torch.long, device=x.device)
-        compressed_x = torch.zeros(B, K, D, device=x.device, dtype=x.dtype)
+        # multiply by boundaries_mask so gradients flow through STE
+        select = assignment * boundaries_mask.unsqueeze(1)  # [B, S, L]
 
-        for b in range(B):
-            idx = all_idx[b]
-            n = idx.shape[0]
-            counts[b] = n
-            boundaries[b, :n] = idx
-            # forced boundaries use x directly (no STE gate); sampled ones use gated_x
-            is_sampled = mask[b][idx]
-            compressed_x[b, :n] = torch.where(
-                is_sampled.unsqueeze(-1), gated_x[b, idx], x[b, idx]
-            )
-            if n < K:
-                boundaries[b, n:] = L
+        compressed_x = select @ x  # [B, S, D]
 
-        return compressed_x, boundaries, gate, counts
+        # extract boundary positions for the decoder
+        boundary_positions = boundaries_mask.detach().argsort(dim=-1, descending=True, stable=True)[:, :S]
+
+        return compressed_x, boundary_positions, probs, counts
 
     def forward(self, x, cos, sin):
         # x: [B, L, D]
