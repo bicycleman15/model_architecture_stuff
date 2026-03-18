@@ -9,13 +9,13 @@ from transformer import TransformerBlock, RMSNorm, build_rope_cache, find_multip
 
 @dataclass
 class Config:
-    block_size: int = 2048
+    block_size: int = 128
     vocab_size: int = 32000
     padded_vocab_size: Optional[int] = None
 
     # shared transformer dimensions
-    dim: int = 512
-    n_head: int = 8
+    dim: int = 256
+    n_head: int = 4
     n_local_heads: int = -1
     head_dim: Optional[int] = None
     intermediate_size: Optional[int] = None
@@ -27,7 +27,7 @@ class Config:
 
     # compressor
     gumbel_tau: float = 1.0
-    max_chunk_size: int = 128
+    max_chunk_size: int = 8
 
     # processor: None = flat transformer blocks, or a Config for recursive nesting
     processor_config: Optional['Config'] = None

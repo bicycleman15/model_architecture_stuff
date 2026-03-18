@@ -20,7 +20,7 @@ class TrainConfig:
     tokenizer_name: str = "bicycleman15/tinystories-gpt4-clean-tokenizer"
 
     # model
-    block_size: int = 512
+    block_size: int = 128
     vocab_size: int = 75
 
     # training  (64 * 512 = 32,768 tokens/step → 3,052 steps ≈ 100M tokens)
@@ -67,7 +67,8 @@ class TokenDataset(torch.utils.data.Dataset):
 def main():
     cfg = TrainConfig()
     seed_everything(cfg.seed)
-    device = "cuda"
+
+    device = "cuda" if torch.cuda.is_available() else "mps" if torch.backends.mps.is_available() else "cpu"
 
     # data
     train_dataset = TokenDataset(os.path.join(cfg.data_dir, "train.pt"), cfg.block_size)
