@@ -26,7 +26,7 @@ class TrainConfig:
     # model
     block_size: int = 256
     vocab_size: int = 75
-    n_levels: int = 2
+    n_levels: int = 1
 
     # training  (64 * 512 = 32,768 tokens/step → 3,052 steps ≈ 100M tokens)
     batch_size: int = 128

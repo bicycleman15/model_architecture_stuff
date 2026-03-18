@@ -30,9 +30,9 @@ def visualize_boundaries(model, val_dataloader, tokenizer, n=3):
 
         parts = []
         for i, tok in enumerate(tokens):
-            parts.append(tok)
-            if i in bnd and i < L - 1:
+            if i in bnd and i > 0:
                 parts.append("|")
+            parts.append(tok)
         print(f"[boundaries] chunks={nc}\n{''.join(parts)}\n")
     print()
 

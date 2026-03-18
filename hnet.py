@@ -26,8 +26,8 @@ class Config:
     n_decoder_layers: int = 3
 
     # compressor
-    gumbel_tau: float = 1.0
-    max_chunk_size: int = 8
+    # gumbel_tau: float = 1.0 # same here, we don't need this
+    # max_chunk_size: int = 8 # we don't need this for now
 
     # processor: None = flat transformer blocks, or a Config for recursive nesting
     processor_config: Optional['Config'] = None
@@ -58,35 +58,58 @@ class Compressor(nn.Module):
     def __init__(self, config):
         super().__init__()
         self.config = config
-        self.tau = config.gumbel_tau
 
         self.layers = nn.ModuleList(
             TransformerBlock(config) for _ in range(config.n_compressor_layers)
         )
         self.norm = RMSNorm(config.dim, eps=config.norm_eps)
 
-        self.should_chunk_mlp = nn.Sequential(
+        self.router = nn.Sequential(
             nn.Linear(config.dim, config.dim),
             nn.SiLU(),
             nn.Linear(config.dim, 1),
         )
 
-    def chunk_and_compress(self, x):
+    def chunk(self, x):
+        # this function helps us abstract out chunking
+        # from other parts of the architecture
+        
+        # decides how to chunk up x
+        # (a) use uniform chunking
+        # (b) use some entropy based chunking
+        # (c) spacebyte?
+        # (d) use router based chunking
+        # they all reside here
+
+        # we return the select matrix for these different chunking mechanisms
+        # and boundary_positions for the decoder to reconstruct back to original dimensionality
+
+        if self.config.chunk_method == "uniform":
+            pass
+        
+        elif self.config.chunk_method == "router":
+            pass
+
+        else:
+            raise NotImplementedError
+
+
+    def compress(self, x):
         # x: [B, L, D]
         B, L, D = x.shape
 
-        logits = self.should_chunk_mlp(x).squeeze(-1)  # [B, L]
+        logits = self.router(x).squeeze(-1)  # [B, L]
         
         probs = torch.sigmoid(logits) # [B, L]
 
-        # hard boundary decisions: 1 = chunk ends at this position
+        # hard boundary decisions: 1 = new chunk STARTS at this position
         boundaries_mask = probs + ((probs > 0.5).float() - probs).detach()  # [B, L]
-        boundaries_mask[:, -1] = 1.0  # force last position to be a boundary
+        boundaries_mask[:, 0] = 1.0  # position 0 always starts a chunk
 
-        counts = boundaries_mask.sum(dim=-1).long()  # [B] number of segments
+        counts = boundaries_mask.sum(dim=-1).long()  # [B] number of chunks
         S = counts.max().item()
 
-        # use detached cumsum to figure out which segment each boundary belongs to
+        # cumsum assigns each position to a chunk index (1-indexed)
         cumsum = torch.cumsum(boundaries_mask.detach(), dim=-1)  # [B, L]
         segment_indices = torch.arange(1, S + 1, device=x.device).view(1, S, 1)  # [1, S, 1]
         assignment = (cumsum.unsqueeze(1) == segment_indices).float()  # [B, S, L]
@@ -96,7 +119,7 @@ class Compressor(nn.Module):
 
         compressed_x = select @ x  # [B, S, D]
 
-        # extract boundary positions for the decoder
+        # extract sorted start positions for the decoder
         boundary_positions = boundaries_mask.detach().argsort(dim=-1, descending=True, stable=True)[:, :S]
 
         return compressed_x, boundary_positions, probs, counts
@@ -108,7 +131,7 @@ class Compressor(nn.Module):
             x = layer(x, cos, sin)
         x = self.norm(x)
 
-        compressed_x, boundaries, probs, counts = self.chunk_and_compress(x)
+        compressed_x, boundaries, probs, counts = self.compress(x)
 
         avg_chunk_size = x.shape[1] / counts.float().mean().item()
 
@@ -116,12 +139,10 @@ class Compressor(nn.Module):
         
 
 class Decoder(nn.Module):
-    # decoder decodes compressed chunks back to tokens
+    # decoder expands chunk-level processor outputs back to full sequence length
     def __init__(self, config):
         super().__init__()
         self.config = config
-
-        self.start_emb = nn.Embedding(1, config.dim)
 
         self.layers = nn.ModuleList(
             TransformerBlock(config) for _ in range(config.n_decoder_layers)
@@ -130,29 +151,24 @@ class Decoder(nn.Module):
 
     def forward(self, x_processed, boundaries, counts, x_residual, cos, sin, seq_len):
         # x_processed: [B, K, D]
-        # boundaries: [B, K] — last position (inclusive) of each chunk, boundaries[-1] = seq_len - 1
-        # counts: [B] — actual number of valid boundaries per batch element
+        # boundaries: [B, K] — start position of each chunk, sorted ascending
+        # counts: [B] — number of valid chunks per batch element
         # x_residual: [B, L, D] — full-length output from compressor
         B, K, D = x_processed.shape
+        L = x_residual.shape[1]
 
-        # Causal chunk shift: processor output for chunk i is used to decode chunk i+1.
-        # chunk 0 positions: learnable start embedding (no previous chunk)
-        # chunk i positions: processor output for chunk i-1 (summary of chunks 0..i-1)
+        # Expand chunk[i] to all positions in chunk[i].
+        # No causal shift: the compressed rep at start[i] only depends on
+        # positions <= start[i], so broadcasting it to positions >= start[i] is causal.
         batch_expanded = []
         for b in range(B):
             n = counts[b].item()
             chunks = []
             for i in range(n):
-                start = 0 if i == 0 else boundaries[b, i - 1].item() + 1
-                end = boundaries[b, i].item() + 1
+                start = boundaries[b, i].item()
+                end = boundaries[b, i + 1].item() if i + 1 < n else L
                 chunk_size = end - start
-                if i == 0:
-                    rep = self.start_emb.weight[0]
-                else:
-                    rep = x_processed[b, i - 1]
-                # expand previous chunk representations to current chunk_size and then
-                # add in with the current chunk's representations coming from the compressor
-                chunks.append(einops.repeat(rep, 'd -> c d', c=chunk_size))
+                chunks.append(einops.repeat(x_processed[b, i], 'd -> c d', c=chunk_size))
             batch_expanded.append(torch.cat(chunks, dim=0))  # [L, D]
         x = torch.stack(batch_expanded, dim=0)  # [B, L, D]
 
