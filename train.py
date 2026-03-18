@@ -24,13 +24,13 @@ class TrainConfig:
     tokenizer_name: str = "bicycleman15/tinystories-gpt4-clean-tokenizer"
 
     # model
-    block_size: int = 128
+    block_size: int = 256
     vocab_size: int = 75
-    n_levels: int = 3
+    n_levels: int = 2
 
     # training  (64 * 512 = 32,768 tokens/step → 3,052 steps ≈ 100M tokens)
-    batch_size: int = 64
-    train_iters: int = 3_052
+    batch_size: int = 128
+    train_iters: int = 15_000 # ~300M tokens now
     grad_accum: int = 1
     grad_norm: float = 1.0
     seed: int = 42
@@ -42,7 +42,7 @@ class TrainConfig:
     warmup_iters: int = 100
 
     # eval
-    eval_interval: int = 50
+    eval_interval: int = 1000
     eval_iters: int = 50
 
     # saving
@@ -51,7 +51,7 @@ class TrainConfig:
 
     # wandb
     wandb_project: str = "hnet-tinystories"
-    wandb_run_name: str = "hnet"
+    wandb_run_name: str = "test"
 
 
 def build_config(vocab_size, block_size, n_levels):
@@ -109,6 +109,7 @@ def main():
     # data
     train_dataset = TokenDataset(os.path.join(cfg.data_dir, "train.pt"), cfg.block_size)
     test_dataset = TokenDataset(os.path.join(cfg.data_dir, "test.pt"), cfg.block_size)
+    accelerator.print(f"Train tokens: {len(train_dataset.tokens):,} | Test tokens: {len(test_dataset.tokens):,}")
 
     g = torch.Generator()
     g.manual_seed(cfg.seed)
@@ -141,6 +142,7 @@ def main():
     accelerator.print(f"Gradient Accumulation steps: {cfg.grad_accum}")
     accelerator.print(f"Train iters: {cfg.train_iters:,}")
     accelerator.print(f"Tokens per iter: {cfg.batch_size * accelerator.num_processes * cfg.block_size:,}")
+    accelerator.print(f"Total tokens iterating over: {cfg.train_iters * cfg.batch_size * accelerator.num_processes * cfg.block_size:,}")
     accelerator.print("*****************************************************************")
 
     # optimizer

@@ -105,7 +105,7 @@ def main():
     test  = ds.select(range(0, 10_000))
     # val   = ds.select(range(10_000, 20_000))
     # train = ds.select(range(20_000, len(ds)))
-    train = ds.select(range(20_000, 120_000))
+    train = ds.select(range(20_000, 500_000))
 
     # tokenize and save both splits
     tokenize_and_save("train", train, save_path)

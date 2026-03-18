@@ -1,27 +1,21 @@
 #!/bin/bash
 #SBATCH --job-name=hnet
 #SBATCH --open-mode=append
-#SBATCH --output=/scratch/jp7467/slurm_logs/%j_%x.out
-#SBATCH --error=/scratch/jp7467/slurm_logs/%j_%x.err
+#SBATCH --output=slurm_logs/%j_%x.out
+#SBATCH --error=slurm_logs/%j_%x.err
 #SBATCH --export=ALL
-#SBATCH --time=2:00:00
-#SBATCH --gres=gpu:h200:1
-#SBATCH --account=torch_pr_235_cds
-#SBATCH --mem=300G
+#SBATCH --time=24:00:00
+#SBATCH --gres=gpu:1
+#SBATCH --mem=128G
 #SBATCH --cpus-per-task=8
+#SBATCH --partition=a100_dev,a100_short,a100_long
 
-START_TIME=$(date +%s)
-echo "Job started at: $(date)"
-################################################
+# first activate the environment and then submit the job from the terminal :)
+# use `sbatch submit.slurm`
+# note we do not have WANDB_MODE=offline here because we are submitting the job to the cluster
 
-source ~/.bashrc # so that we can read HF_AUTH_TOKEN :)
+accelerate launch --config-file accelerate.yaml --mixed_precision=bf16 --num_processes=1 train.py
 
-conda activate
-conda activate t2
-
-python train.py
-
-END_TIME=$(date +%s)
-ELAPSED_TIME=$((END_TIME - START_TIME))
-echo "Job finished at: $(date)"
-echo "Time taken: $((ELAPSED_TIME / 3600))h $((ELAPSED_TIME % 3600 / 60))m $((ELAPSED_TIME % 60))s"
+echo "Run finished at: "
+date
+exit

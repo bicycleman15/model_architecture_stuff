@@ -211,3 +211,5 @@ data/
 
 wandb/
 checkpoints/
+
+slurm_logs/

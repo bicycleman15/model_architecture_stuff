@@ -14,8 +14,8 @@ class Config:
     padded_vocab_size: Optional[int] = None
 
     # shared transformer dimensions
-    dim: int = 256
-    n_head: int = 4
+    dim: int = 512
+    n_head: int = 8
     n_local_heads: int = -1
     head_dim: Optional[int] = None
     intermediate_size: Optional[int] = None
