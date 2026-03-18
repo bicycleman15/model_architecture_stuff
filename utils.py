@@ -11,16 +11,19 @@ from tqdm import tqdm
 
 
 @torch.no_grad()
-def visualize_boundaries(model, input_ids, tokenizer, n=1):
+def visualize_boundaries(model, val_dataloader, tokenizer, n=3):
     """Show how the compressor chunks a sample, using | as delimiters."""
     model.eval()
-    x = model.emb(input_ids[:n])
+    input_ids, _ = next(iter(val_dataloader))
+    input_ids = input_ids[:n].to(next(model.parameters()).device)
+
+    x = model.emb(input_ids)
     B, L, D = x.shape
     cos = model.model.cos[:, :L]
     sin = model.model.sin[:, :L]
     _, _, boundaries, counts, _ = model.model.compressor(x, cos, sin)
 
-    for b in range(n):
+    for b in range(min(n, B)):
         tokens = tokenizer.convert_ids_to_tokens(input_ids[b].tolist())
         nc = counts[b].item()
         bnd = set(boundaries[b, :nc].tolist())
@@ -30,18 +33,21 @@ def visualize_boundaries(model, input_ids, tokenizer, n=1):
             parts.append(tok)
             if i in bnd and i < L - 1:
                 parts.append("|")
-        print(f"[boundaries] chunks={nc}  {''.join(parts)}")
+        print(f"[boundaries] chunks={nc}\n{''.join(parts)}\n")
+    print()
 
     model.train()
 
 
 @torch.no_grad()
-def validate(model, val_dataloader, device):
+def validate(model, val_dataloader, device, eval_iters=None):
     model.eval()
     total_loss = 0.0
     total_tokens = 0
 
-    for input_ids, targets in tqdm(val_dataloader, desc="Evaluating"):
+    for i, (input_ids, targets) in enumerate(tqdm(val_dataloader, desc="Evaluating", total=eval_iters)):
+        if eval_iters is not None and i >= eval_iters:
+            break
         input_ids, targets = input_ids.to(device), targets.to(device)
         num_tokens = (targets != -100).sum().item()
         logits, _ = model(input_ids)

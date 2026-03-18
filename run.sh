@@ -1,4 +1,4 @@
 # temp
 
 WANDB_MODE=offline \
-python train.py
+accelerate launch --config-file accelerate.yaml --mixed_precision=bf16 --num_processes=1 train.py

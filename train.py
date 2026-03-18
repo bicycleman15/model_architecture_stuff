@@ -7,7 +7,11 @@ import torch
 import torch.nn.functional as F
 import wandb
 
+torch._dynamo.config.optimize_ddp = False
+
 from transformers import AutoTokenizer
+from accelerate import Accelerator
+from accelerate.utils import DistributedDataParallelKwargs
 
 from hnet import HierarchicalLM, Config
 from utils import CycleIterator, validate, get_lr, num_parameters, seed_everything, visualize_boundaries
@@ -37,8 +41,8 @@ class TrainConfig:
     warmup_iters: int = 100
 
     # eval
-    eval_interval: int = 300
-    eval_iters: int = 100
+    eval_interval: int = 50
+    eval_iters: int = 50
 
     # saving
     save_dir: str = "checkpoints"
@@ -66,9 +70,11 @@ class TokenDataset(torch.utils.data.Dataset):
 
 def main():
     cfg = TrainConfig()
-    seed_everything(cfg.seed)
 
-    device = "cuda" if torch.cuda.is_available() else "mps" if torch.backends.mps.is_available() else "cpu"
+    ddp_kwargs = DistributedDataParallelKwargs(find_unused_parameters=True)
+    accelerator = Accelerator(kwargs_handlers=[ddp_kwargs])
+
+    seed_everything(cfg.seed)
 
     # data
     train_dataset = TokenDataset(os.path.join(cfg.data_dir, "train.pt"), cfg.block_size)
@@ -82,6 +88,8 @@ def main():
     test_loader = torch.utils.data.DataLoader(
         test_dataset, batch_size=cfg.batch_size, shuffle=False, pin_memory=True,
     )
+
+    train_loader = accelerator.prepare_data_loader(train_loader)
     train_iterator = CycleIterator(train_loader)
 
     # tokenizer (for boundary visualization)
@@ -92,12 +100,21 @@ def main():
         vocab_size=cfg.vocab_size,
         block_size=cfg.block_size,
     )
-    model = HierarchicalLM(model_config).to(device)
-    model.setup_cache(device=device)
-    print(model)
+    model = HierarchicalLM(model_config)
 
-    print(model_config)
-    print(f"Parameters: {num_parameters(model):,}")
+    accelerator.print(model)
+    accelerator.print(model_config)
+    accelerator.print(f"Parameters: {num_parameters(model):,}")
+
+    accelerator.print("*****************************************************************")
+    accelerator.print(f"Using #GPUs: {accelerator.num_processes}")
+    accelerator.print(f"Using Mixed Precision: {accelerator.mixed_precision}")
+    accelerator.print(f"Batch size on single device: {cfg.batch_size}")
+    accelerator.print(f"Total effective batch size: {cfg.batch_size * accelerator.num_processes * cfg.grad_accum}")
+    accelerator.print(f"Gradient Accumulation steps: {cfg.grad_accum}")
+    accelerator.print(f"Train iters: {cfg.train_iters:,}")
+    accelerator.print(f"Tokens per iter: {cfg.batch_size * accelerator.num_processes * cfg.block_size:,}")
+    accelerator.print("*****************************************************************")
 
     # optimizer
     optimizer = torch.optim.AdamW(
@@ -105,14 +122,23 @@ def main():
         lr=cfg.lr, weight_decay=cfg.weight_decay, betas=(0.9, 0.95),
     )
 
-    # wandb
-    wandb.init(project=cfg.wandb_project, name=cfg.wandb_run_name, config=vars(cfg))
+    model, optimizer = accelerator.prepare(model, optimizer)
+    accelerator.unwrap_model(model).setup_cache(device=accelerator.device)
+
+    # wandb (main process only)
+    if accelerator.is_main_process:
+        wandb.init(project=cfg.wandb_project, name=cfg.wandb_run_name, config=vars(cfg))
+
+    accelerator.wait_for_everyone()
 
     # training loop
-    bar = tqdm(range(cfg.train_iters), desc="Training")
+    bar = tqdm(range(cfg.train_iters), desc="Training", disable=(not accelerator.is_main_process))
     for step in bar:
         input_ids, targets = next(train_iterator)
-        input_ids, targets = input_ids.to(device), targets.to(device)
+        input_ids = input_ids.to(accelerator.device, non_blocking=True)
+        targets = targets.to(accelerator.device, non_blocking=True)
+
+        start_time = time.time()
 
         if step % cfg.grad_accum == 0:
             optimizer.zero_grad()
@@ -121,42 +147,65 @@ def main():
         for pg in optimizer.param_groups:
             pg["lr"] = lr
 
-        logits, avg_chunk_size = model(input_ids)
-        loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.view(-1))
-        (loss / cfg.grad_accum).backward()
+        with accelerator.autocast():
+            logits, avg_chunk_size = model(input_ids)
+            loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.view(-1))
+
+        accelerator.backward(loss / cfg.grad_accum)
 
         if (step + 1) % cfg.grad_accum == 0:
             if cfg.grad_norm > 0:
-                torch.nn.utils.clip_grad_norm_(model.parameters(), cfg.grad_norm)
+                accelerator.clip_grad_norm_(model.parameters(), cfg.grad_norm)
             optimizer.step()
 
-        bar.set_postfix_str(f"loss={loss.item():.4f} lr={lr:.6f} avg_chunk_size={avg_chunk_size:.1f}")
-        wandb.log({"train/loss": loss.item(), "train/lr": lr, "train/avg_chunk_size": avg_chunk_size})
+            time_taken = time.time() - start_time
+            token_throughput = input_ids.shape[0] * input_ids.shape[1] / time_taken / 1000
 
-        # if step % 25 == 0:
-        #     visualize_boundaries(model, input_ids, tokenizer)
+            if accelerator.is_main_process:
+                wandb.log({
+                    "train/loss": loss.item(),
+                    "train/lr": lr,
+                    "train/avg_chunk_size": avg_chunk_size,
+                    "perf/Ktokens_s": token_throughput,
+                })
+
+        bar.set_postfix_str(f"loss={loss.item():.4f} lr={lr:.6f} avg_chunk_size={avg_chunk_size:.1f}")
 
         # eval
         if step > 0 and step % cfg.eval_interval == 0:
-            val_loss, val_ppl = validate(model, test_loader, device)
-            print(f"\nStep {step}: val_loss={val_loss:.4f} ppl={val_ppl:.2f}")
-            wandb.log({"val/loss": val_loss, "val/perplexity": val_ppl})
+            val_loss, val_ppl = validate(model, test_loader, accelerator.device, eval_iters=cfg.eval_iters)
+            accelerator.print(f"\nStep {step}: val_loss={val_loss:.4f} ppl={val_ppl:.2f}")
+            if accelerator.is_main_process:
+                wandb.log({"val/loss": val_loss, "val/perplexity": val_ppl})
+
+            if accelerator.is_main_process:
+                visualize_boundaries(accelerator.unwrap_model(model), test_loader, tokenizer, n=3)
 
         # save
         if step > 0 and step % cfg.save_interval == 0:
-            os.makedirs(cfg.save_dir, exist_ok=True)
-            path = os.path.join(cfg.save_dir, f"step_{step:07d}.pt")
-            torch.save(model.state_dict(), path)
-            print(f"\nSaved checkpoint: {path}")
+            if accelerator.is_main_process:
+                os.makedirs(cfg.save_dir, exist_ok=True)
+                path = os.path.join(cfg.save_dir, f"step_{step:07d}.pt")
+                accelerator.save(accelerator.unwrap_model(model).state_dict(), path)
+                accelerator.print(f"\nSaved checkpoint: {path}")
+            accelerator.wait_for_everyone()
 
     # final save & eval
-    os.makedirs(cfg.save_dir, exist_ok=True)
-    torch.save(model.state_dict(), os.path.join(cfg.save_dir, "final.pt"))
+    if accelerator.is_main_process:
+        os.makedirs(cfg.save_dir, exist_ok=True)
+        accelerator.save(
+            accelerator.unwrap_model(model).state_dict(),
+            os.path.join(cfg.save_dir, "final.pt"),
+        )
 
-    val_loss, val_ppl = validate(model, test_loader, device)
-    print(f"Final: val_loss={val_loss:.4f} ppl={val_ppl:.2f}")
-    wandb.log({"val/loss": val_loss, "val/perplexity": val_ppl})
-    wandb.finish()
+    val_loss, val_ppl = validate(model, test_loader, accelerator.device)
+    accelerator.print(f"Final: val_loss={val_loss:.4f} ppl={val_ppl:.2f}")
+
+    accelerator.wait_for_everyone()
+
+    if accelerator.is_main_process:
+        wandb.log({"val/loss": val_loss, "val/perplexity": val_ppl})
+        wandb.finish()
 
 
 if __name__ == "__main__":
