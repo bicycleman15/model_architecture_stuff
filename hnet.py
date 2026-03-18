@@ -205,15 +205,16 @@ class Processor(nn.Module):
 
 class HierarchicalModel(nn.Module):
     # pure embedding-to-embedding model with its own RoPE cache
-    # forward(x) -> x, making it usable as a processor in a parent HierarchicalModel
+    # forward(x) -> (x, stats_dict), making it usable as a processor in a parent HierarchicalModel
 
-    def __init__(self, config):
+    def __init__(self, config, depth=0):
         super().__init__()
         self.config = config
+        self.depth = depth
 
         self.compressor = Compressor(config)
         if config.processor_config is not None:
-            self.processor = HierarchicalModel(config.processor_config)
+            self.processor = HierarchicalModel(config.processor_config, depth=depth + 1)
         else:
             self.processor = Processor(config)
         self.decoder = Decoder(config)
@@ -237,11 +238,18 @@ class HierarchicalModel(nn.Module):
 
         x, x_compressed, boundaries, counts, avg_chunk_size = self.compressor(x, cos, sin)
 
-        x_processed = self.processor(x_compressed)
+        stats = {f"level_{self.depth}/avg_chunk_size": avg_chunk_size}
+
+        processor_out = self.processor(x_compressed)
+        if isinstance(processor_out, tuple):
+            x_processed, inner_stats = processor_out
+            stats.update(inner_stats)
+        else:
+            x_processed = processor_out
 
         out = self.decoder(x_processed, boundaries, counts, x, cos, sin, L)
 
-        return out, avg_chunk_size
+        return out, stats
 
 
 class HierarchicalLM(nn.Module):
@@ -260,9 +268,9 @@ class HierarchicalLM(nn.Module):
 
     def forward(self, input_ids):
         x = self.emb(input_ids)  # [B, L, D]
-        out, avg_chunk_size = self.model(x)  # [B, L, D]
+        out, stats = self.model(x)  # [B, L, D], dict
         logits = self.vocab(out)  # [B, L, V]
-        return logits, avg_chunk_size
+        return logits, stats
 
 
 if __name__ == "__main__":
@@ -280,6 +288,6 @@ if __name__ == "__main__":
     input_ids = torch.randint(0, config.vocab_size, (2, 128), device=device)
     print("input_ids.shape:", input_ids.shape)
 
-    logits, avg_chunk_size = model(input_ids)
+    logits, stats = model(input_ids)
     print("logits.shape:", logits.shape)
-    print("avg_chunk_size:", avg_chunk_size)
+    print("stats:", stats)

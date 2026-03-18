@@ -26,6 +26,7 @@ class TrainConfig:
     # model
     block_size: int = 128
     vocab_size: int = 75
+    n_levels: int = 3
 
     # training  (64 * 512 = 32,768 tokens/step → 3,052 steps ≈ 100M tokens)
     batch_size: int = 64
@@ -51,6 +52,35 @@ class TrainConfig:
     # wandb
     wandb_project: str = "hnet-tinystories"
     wandb_run_name: str = "hnet"
+
+
+def build_config(vocab_size, block_size, n_levels):
+    """Recursively build a nested Config chain with n_levels of hierarchy."""
+    if n_levels <= 1:
+        return Config(
+            vocab_size=vocab_size,
+            block_size=block_size,
+            processor_config=None,
+        )
+
+    max_chunk = 8 # this is not used for now
+    inner_block_size = block_size # for now it maches the global batch size
+
+    inner = build_config(
+        vocab_size=vocab_size,
+        block_size=inner_block_size,
+        n_levels=n_levels - 1,
+    )
+
+    return Config(
+        vocab_size=vocab_size,
+        block_size=block_size,
+        n_compressor_layers=3,
+        n_processor_layers=6,
+        n_decoder_layers=3,
+        max_chunk_size=max_chunk,
+        processor_config=inner,
+    )
 
 
 class TokenDataset(torch.utils.data.Dataset):
@@ -96,10 +126,7 @@ def main():
     tokenizer = AutoTokenizer.from_pretrained(cfg.tokenizer_name)
 
     # model
-    model_config = Config(
-        vocab_size=cfg.vocab_size,
-        block_size=cfg.block_size,
-    )
+    model_config = build_config(cfg.vocab_size, cfg.block_size, cfg.n_levels)
     model = HierarchicalLM(model_config)
 
     accelerator.print(model)
@@ -148,7 +175,7 @@ def main():
             pg["lr"] = lr
 
         with accelerator.autocast():
-            logits, avg_chunk_size = model(input_ids)
+            logits, stats = model(input_ids)
             loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.view(-1))
 
         accelerator.backward(loss / cfg.grad_accum)
@@ -162,14 +189,17 @@ def main():
             token_throughput = input_ids.shape[0] * input_ids.shape[1] / time_taken / 1000
 
             if accelerator.is_main_process:
-                wandb.log({
+                log_dict = {
                     "train/loss": loss.item(),
                     "train/lr": lr,
-                    "train/avg_chunk_size": avg_chunk_size,
                     "perf/Ktokens_s": token_throughput,
-                })
+                }
+                for k, v in stats.items():
+                    log_dict[f"train/{k}"] = v
+                wandb.log(log_dict)
 
-        bar.set_postfix_str(f"loss={loss.item():.4f} lr={lr:.6f} avg_chunk_size={avg_chunk_size:.1f}")
+        chunks_str = " ".join(f"L{k.split('/')[0].split('_')[1]}={v:.1f}" for k, v in sorted(stats.items()))
+        bar.set_postfix_str(f"loss={loss.item():.4f} lr={lr:.6f} {chunks_str}")
 
         # eval
         if step > 0 and step % cfg.eval_interval == 0:
