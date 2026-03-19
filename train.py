@@ -24,25 +24,25 @@ class TrainConfig:
     tokenizer_name: str = "bicycleman15/tinystories-gpt4-clean-tokenizer"
 
     # model
-    block_size: int = 64
+    block_size: int = 256
     vocab_size: int = 75
     n_levels: int = 1
 
     # training  (64 * 512 = 32,768 tokens/step → 3,052 steps ≈ 100M tokens)
-    batch_size: int = 128 # 128
-    train_iters: int = 15_000 # ~300M tokens now
-    grad_accum: int = 1
+    batch_size: int = 256 # 128
+    train_iters: int = 8000 # ~300M tokens now
+    grad_accum: int = 4
     grad_norm: float = 1.0
     seed: int = 42
 
     # optimizer
-    lr: float = 3e-4
+    lr: float = 6e-4
     min_lr: float = 1e-5
     weight_decay: float = 0.1
-    warmup_iters: int = 100
+    warmup_iters: int = 500
 
     # eval
-    eval_interval: int = 1000
+    eval_interval: int = 500
     eval_iters: int = 50
 
     # saving
@@ -137,12 +137,15 @@ def main():
     accelerator.print(f"Parameters: {num_parameters(model):,}")
     accelerator.print(f"Using #GPUs: {accelerator.num_processes}")
     accelerator.print(f"Using Mixed Precision: {accelerator.mixed_precision}")
+    accelerator.print(f"Using block size: {cfg.block_size}")
     accelerator.print(f"Batch size on single device: {cfg.batch_size}")
     accelerator.print(f"Total effective batch size: {cfg.batch_size * accelerator.num_processes * cfg.grad_accum}")
     accelerator.print(f"Gradient Accumulation steps: {cfg.grad_accum}")
     accelerator.print(f"Train iters: {cfg.train_iters:,}")
+    accelerator.print(f"Optimization steps: {cfg.train_iters // cfg.grad_accum:,}")
     accelerator.print(f"Tokens per iter: {cfg.batch_size * accelerator.num_processes * cfg.block_size:,}")
-    accelerator.print(f"Total tokens iterating over: {cfg.train_iters * cfg.batch_size * accelerator.num_processes * cfg.block_size:,}")
+    accelerator.print(f"Tokens per optimization step: {cfg.batch_size * accelerator.num_processes * cfg.block_size * cfg.grad_accum:,}")
+    accelerator.print(f"Total tokens in training: {cfg.train_iters * cfg.batch_size * accelerator.num_processes * cfg.block_size:,}")
     accelerator.print("*****************************************************************")
 
     # optimizer
