@@ -26,8 +26,9 @@ class Config:
     n_decoder_layers: int = 3
 
     # compressor
-    chunk_method: str = "router"  # "uniform" or "router"
+    chunk_method: str = "router"  # "uniform", "router", or "spacebyte"
     chunk_size: int = 4           # fixed chunk size for uniform chunking
+    spacebyte_boundary_ids: Optional[tuple] = None  # token IDs that trigger chunk boundaries
 
     # processor
     processor_dim: Optional[int] = None  # dim the processor operates at (default: 3/2 * dim)
@@ -74,16 +75,37 @@ class Compressor(nn.Module):
             nn.Linear(config.dim, 1),
         )
 
-    def chunk(self, x):
-        # this function helps us abstract out chunking
-        # from other parts of the architecture
-        
+        if config.chunk_method == "spacebyte":
+            assert config.spacebyte_boundary_ids is not None, (
+                "spacebyte requires spacebyte_boundary_ids in Config"
+            )
+            mask = torch.zeros(config.padded_vocab_size, dtype=torch.bool)
+            for tid in config.spacebyte_boundary_ids:
+                mask[tid] = True
+            self.register_buffer("boundary_vocab_mask", mask, persistent=False)
+
+    def _boundaries_mask_to_select(self, boundaries_mask, device):
+        """Convert a [B, L] binary boundary mask to the select matrix and positions."""
+        counts = boundaries_mask.sum(dim=-1).long()  # [B]
+        S = counts.max().item()
+
+        cumsum = torch.cumsum(boundaries_mask.detach(), dim=-1)  # [B, L]
+        segment_indices = torch.arange(1, S + 1, device=device).view(1, S, 1)
+
+        assignment = (cumsum.unsqueeze(1) == segment_indices).float()  # [B, S, L]
+        select = assignment * boundaries_mask.unsqueeze(1)  # [B, S, L]
+
+        boundary_positions = boundaries_mask.detach().argsort(
+            dim=-1, descending=True, stable=True
+        )[:, :S]
+
+        return select, boundary_positions, counts
+
+    def chunk(self, x, input_ids=None):
         # decides how to chunk up x
         # (a) use uniform chunking
-        # (b) use some entropy based chunking
-        # (c) spacebyte?
-        # (d) use router based chunking
-        # they all reside here
+        # (b) use router based chunking
+        # (c) spacebyte — deterministic boundaries from UTF-8 byte structure
 
         # returns (select, boundary_positions, probs, counts)
         # select: [B, S, L] — selector matrix, one-hot at chunk start positions
@@ -114,38 +136,48 @@ class Compressor(nn.Module):
             boundaries_mask[:, 0] = 1.0 # force first token to be a boundary start
 
             ### helpers to get the select matrix
-            counts = boundaries_mask.sum(dim=-1).long()  # [B]
-            S = counts.max().item()
-
-            cumsum = torch.cumsum(boundaries_mask.detach(), dim=-1)  # [B, L]
-            segment_indices = torch.arange(1, S + 1, device=x.device).view(1, S, 1)
-
-            assignment = (cumsum.unsqueeze(1) == segment_indices).float()  # [B, S, L]
-            select = assignment * boundaries_mask.unsqueeze(1)  # [B, S, L]
-            
-            boundary_positions = boundaries_mask.detach().argsort(
-                dim=-1, descending=True, stable=True
-            )[:, :S]
-            ###
-
+            select, boundary_positions, counts = self._boundaries_mask_to_select(
+                boundaries_mask, x.device
+            )
             return select, boundary_positions, probs, counts
+
+        elif self.config.chunk_method == "spacebyte":
+            assert input_ids is not None, "spacebyte chunking requires input_ids"
+
+            # look up which tokens are boundary characters (non-alphanumeric)
+            # via the pre-computed vocab mask from spacebyte_boundary_ids
+            is_boundary_char = self.boundary_vocab_mask[input_ids]  # [B, L]
+
+            # SpaceByte convention: keep only the first of each
+            # consecutive non-alphanumeric group
+            is_boundary_char = is_boundary_char.clone()
+            is_boundary_char[:, 1:] &= is_boundary_char[:, :-1].bitwise_not()
+            is_boundary_char[:, 0] = True
+
+            boundaries_mask = is_boundary_char.float()
+            select, boundary_positions, counts = self._boundaries_mask_to_select(
+                boundaries_mask, x.device
+            )
+            return select, boundary_positions, None, counts
 
         else:
             raise NotImplementedError(f"Unknown chunk_method: {self.config.chunk_method}")
 
-    def compress(self, x):
-        select, boundary_positions, probs, counts = self.chunk(x)
+
+    def compress(self, x, input_ids=None):
+        select, boundary_positions, probs, counts = self.chunk(x, input_ids=input_ids)
         compressed_x = select @ x  # [B, S, D]
         return compressed_x, boundary_positions, probs, counts
 
-    def forward(self, x, cos, sin):
+
+    def forward(self, x, cos, sin, input_ids=None):
         # x: [B, L, D]
 
         for layer in self.layers:
             x = layer(x, cos, sin)
         x = self.norm(x)
 
-        compressed_x, boundaries, probs, counts = self.compress(x)
+        compressed_x, boundaries, probs, counts = self.compress(x, input_ids=input_ids)
 
         avg_chunk_size = x.shape[1] / counts.float().mean().item()
 
@@ -271,14 +303,14 @@ class HierarchicalModel(nn.Module):
 
         self.processor.setup_cache(device=device)
 
-    def forward(self, x):
+    def forward(self, x, input_ids=None):
         # x: [B, L, D]
         B, L, D = x.shape
 
         cos = self.cos[:, :L]
         sin = self.sin[:, :L]
 
-        x, x_compressed, boundaries, counts, avg_chunk_size = self.compressor(x, cos, sin)
+        x, x_compressed, boundaries, counts, avg_chunk_size = self.compressor(x, cos, sin, input_ids=input_ids)
 
         stats = {f"level_{self.depth}/avg_chunk_size": avg_chunk_size}
 
@@ -314,7 +346,7 @@ class HierarchicalLM(nn.Module):
 
     def forward(self, input_ids):
         x = self.emb(input_ids)  # [B, L, D]
-        out, stats = self.model(x)  # [B, L, D], dict
+        out, stats = self.model(x, input_ids=input_ids)  # [B, L, D], dict
         logits = self.vocab(out)  # [B, L, V]
         return logits, stats
 

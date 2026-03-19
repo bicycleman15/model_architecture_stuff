@@ -23,10 +23,11 @@ class TrainConfig:
     tokenizer_name: str = "bicycleman15/tinystories-gpt4-clean-tokenizer"
 
     # model
-    model: str = "transformer"
+    model: str = "hourglass"
     block_size: int = 512
     vocab_size: int = 75
     n_levels: int = 1
+    chunk_method: str = "spacebyte"
 
     batch_size: int = 2
     train_iters: int = 8000 # ~500M tokens
@@ -183,7 +184,9 @@ def main():
                 wandb.log({"val/loss": val_loss, "val/perplexity": val_ppl})
 
             if accelerator.is_main_process:
-                visualize_boundaries(accelerator.unwrap_model(model), test_loader, tokenizer, n=3)
+                if cfg.model == "hourglass":
+                    # only do for hourglass models
+                    visualize_boundaries(accelerator.unwrap_model(model), test_loader, tokenizer, n=3)
 
         # save
         if step > 0 and step % cfg.save_interval == 0:

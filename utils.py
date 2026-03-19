@@ -65,6 +65,19 @@ def get_model(config):
         model_config = build_hourglass_config(
             config.vocab_size, config.block_size, config.n_levels,
         )
+
+        chunk_method = getattr(config, "chunk_method", "router")
+        model_config.chunk_method = chunk_method
+
+        if chunk_method == "spacebyte":
+            from transformers import AutoTokenizer
+            tokenizer = AutoTokenizer.from_pretrained(config.tokenizer_name)
+            vocab = tokenizer.get_vocab()
+            model_config.spacebyte_boundary_ids = tuple(
+                tid for token, tid in vocab.items()
+                if len(token) == 1 and not token.isalnum()
+            )
+
         model = HierarchicalLM(model_config)
         return model_config, model
 
@@ -83,7 +96,7 @@ def visualize_boundaries(model, val_dataloader, tokenizer, n=3):
     B, L, D = x.shape
     cos = model.model.cos[:, :L]
     sin = model.model.sin[:, :L]
-    _, _, boundaries, counts, _ = model.model.compressor(x, cos, sin)
+    _, _, boundaries, counts, _ = model.model.compressor(x, cos, sin, input_ids=input_ids)
 
     for b in range(min(n, B)):
         tokens = tokenizer.convert_ids_to_tokens(input_ids[b].tolist())
