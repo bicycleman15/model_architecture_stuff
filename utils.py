@@ -10,6 +10,68 @@ from typing_extensions import Self
 from tqdm import tqdm
 
 
+def build_hourglass_config(vocab_size, block_size, n_levels, dim=768):
+    # TODO: fix this ugly dim arg
+    """Recursively build a nested Config chain with n_levels of hierarchy."""
+    from hnet import Config
+
+    proc_dim = (dim * 3) // 2
+
+    if n_levels <= 1:
+        return Config(
+            vocab_size=vocab_size,
+            block_size=block_size,
+            dim=dim,
+            processor_dim=proc_dim,
+            processor_config=None,
+        )
+
+    inner_block_size = block_size
+
+    inner = build_hourglass_config(
+        vocab_size=vocab_size,
+        block_size=inner_block_size,
+        n_levels=n_levels - 1,
+        dim=proc_dim,
+    )
+
+    return Config(
+        vocab_size=vocab_size,
+        block_size=block_size,
+        dim=dim,
+        processor_dim=proc_dim,
+        n_compressor_layers=3,
+        n_processor_layers=6,
+        n_decoder_layers=3,
+        processor_config=inner,
+    )
+
+
+def get_model(config):
+
+    if config.model == "transformer":
+        from transformer import TransformerConfig, TransformerLM
+
+        model_config = TransformerConfig(
+            vocab_size=config.vocab_size,
+            block_size=config.block_size,
+        )
+        model = TransformerLM(model_config)
+        return model_config, model
+
+    elif config.model == "hourglass":
+        from hnet import HierarchicalLM
+
+        model_config = build_hourglass_config(
+            config.vocab_size, config.block_size, config.n_levels,
+        )
+        model = HierarchicalLM(model_config)
+        return model_config, model
+
+    else:
+        raise ValueError(f"Unknown model: {config.model}")
+
+
 @torch.no_grad()
 def visualize_boundaries(model, val_dataloader, tokenizer, n=3):
     """Show how the compressor chunks a sample, using | as delimiters."""

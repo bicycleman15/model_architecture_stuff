@@ -1,4 +1,5 @@
 import math
+from dataclasses import dataclass
 from typing import Optional, Tuple
 
 import torch
@@ -129,3 +130,74 @@ class TransformerBlock(nn.Module):
     def forward(self, x: Tensor, cos: Tensor, sin: Tensor, is_causal: bool = True) -> Tensor:
         h = x + self.attention(self.attention_norm(x), cos, sin, is_causal)
         return h + self.feed_forward(self.ffn_norm(h))
+
+
+# ---- Standalone Transformer LM ----
+
+@dataclass
+class TransformerConfig:
+    block_size: int = 512
+    vocab_size: int = 32000
+    padded_vocab_size: Optional[int] = None
+
+    dim: int = 768
+    n_head: int = 12
+    n_local_heads: int = -1
+    head_dim: Optional[int] = None
+    intermediate_size: Optional[int] = None
+
+    n_layers: int = 6
+
+    rope_base: float = 10000
+    norm_eps: float = 1e-5
+    rope_n_elem: Optional[int] = None
+
+    def __post_init__(self):
+        if self.n_local_heads == -1:
+            self.n_local_heads = self.n_head
+        if self.intermediate_size is None:
+            hidden_dim = 4 * self.dim
+            n_hidden = int(2 * hidden_dim / 3)
+            self.intermediate_size = find_multiple(n_hidden, 256)
+
+        assert self.dim % self.n_head == 0
+        self.head_dim = self.dim // self.n_head
+
+        self.padded_vocab_size = find_multiple(self.vocab_size, 256)
+        self.rope_n_elem = self.head_dim
+
+
+class TransformerLM(nn.Module):
+
+    def __init__(self, config: TransformerConfig):
+        super().__init__()
+        self.config = config
+
+        self.emb = nn.Embedding(config.padded_vocab_size, config.dim)
+        self.layers = nn.ModuleList(
+            TransformerBlock(config) for _ in range(config.n_layers)
+        )
+        self.norm = RMSNorm(config.dim, eps=config.norm_eps)
+        self.vocab = nn.Linear(config.dim, config.padded_vocab_size, bias=False)
+
+    def setup_cache(self, device=None):
+        cos, sin = build_rope_cache(
+            self.config.block_size, self.config.rope_n_elem,
+            device=device, base=self.config.rope_base,
+        )
+        self.register_buffer("cos", cos, persistent=False)
+        self.register_buffer("sin", sin, persistent=False)
+
+    def forward(self, input_ids):
+        x = self.emb(input_ids)
+        B, L, D = x.shape
+
+        cos = self.cos[:, :L]
+        sin = self.sin[:, :L]
+
+        for layer in self.layers:
+            x = layer(x, cos, sin)
+        x = self.norm(x)
+
+        logits = self.vocab(x)
+        return logits, {}

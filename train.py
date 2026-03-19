@@ -13,8 +13,7 @@ from transformers import AutoTokenizer
 from accelerate import Accelerator
 from accelerate.utils import DistributedDataParallelKwargs
 
-from hnet import HierarchicalLM, Config
-from utils import CycleIterator, validate, get_lr, num_parameters, seed_everything, visualize_boundaries
+from utils import get_model, CycleIterator, validate, get_lr, num_parameters, seed_everything, visualize_boundaries
 
 
 @dataclass
@@ -24,12 +23,12 @@ class TrainConfig:
     tokenizer_name: str = "bicycleman15/tinystories-gpt4-clean-tokenizer"
 
     # model
+    model: str = "transformer"
     block_size: int = 512
     vocab_size: int = 75
-    dim: int = 768
     n_levels: int = 1
 
-    batch_size: int = 128
+    batch_size: int = 2
     train_iters: int = 8000 # ~500M tokens
     grad_accum: int = 1
     grad_norm: float = 1.0
@@ -52,40 +51,6 @@ class TrainConfig:
     # wandb
     wandb_project: str = "hnet-tinystories"
     wandb_run_name: str = "test"
-
-
-def build_config(vocab_size, block_size, n_levels, dim):
-    """Recursively build a nested Config chain with n_levels of hierarchy."""
-    proc_dim = (dim * 3) // 2
-
-    if n_levels <= 1:
-        return Config(
-            vocab_size=vocab_size,
-            block_size=block_size,
-            dim=dim,
-            processor_dim=proc_dim,
-            processor_config=None,
-        )
-
-    inner_block_size = block_size # for now it matches the global block size
-
-    inner = build_config(
-        vocab_size=vocab_size,
-        block_size=inner_block_size,
-        n_levels=n_levels - 1,
-        dim=proc_dim,
-    )
-
-    return Config(
-        vocab_size=vocab_size,
-        block_size=block_size,
-        dim=dim,
-        processor_dim=proc_dim,
-        n_compressor_layers=3,
-        n_processor_layers=6,
-        n_decoder_layers=3,
-        processor_config=inner,
-    )
 
 
 class TokenDataset(torch.utils.data.Dataset):
@@ -132,8 +97,7 @@ def main():
     tokenizer = AutoTokenizer.from_pretrained(cfg.tokenizer_name)
 
     # model
-    model_config = build_config(cfg.vocab_size, cfg.block_size, cfg.n_levels, cfg.dim)
-    model = HierarchicalLM(model_config)
+    model_config, model = get_model(cfg)
 
     accelerator.print(model)
     accelerator.print(model_config)
