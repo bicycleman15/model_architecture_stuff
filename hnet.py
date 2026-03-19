@@ -26,8 +26,8 @@ class Config:
     n_decoder_layers: int = 3
 
     # compressor
-    # gumbel_tau: float = 1.0 # same here, we don't need this
-    # max_chunk_size: int = 8 # we don't need this for now
+    chunk_method: str = "router"  # "uniform" or "router"
+    chunk_size: int = 4           # fixed chunk size for uniform chunking
 
     # processor: None = flat transformer blocks, or a Config for recursive nesting
     processor_config: Optional['Config'] = None
@@ -81,47 +81,57 @@ class Compressor(nn.Module):
         # (d) use router based chunking
         # they all reside here
 
-        # we return the select matrix for these different chunking mechanisms
-        # and boundary_positions for the decoder to reconstruct back to original dimensionality
+        # returns (select, boundary_positions, probs, counts)
+        # select: [B, S, L] — selector matrix, one-hot at chunk start positions
+        # boundary_positions: [B, S] — start position of each chunk
+        # probs: [B, L] or None — router probabilities (only for "router")
+        # counts: [B] — number of chunks per batch element
 
-        if self.config.chunk_method == "uniform":
-            pass
-        
-        elif self.config.chunk_method == "router":
-            pass
-
-        else:
-            raise NotImplementedError
-
-
-    def compress(self, x):
-        # x: [B, L, D]
         B, L, D = x.shape
 
-        logits = self.router(x).squeeze(-1)  # [B, L]
-        
-        probs = torch.sigmoid(logits) # [B, L]
+        if self.config.chunk_method == "uniform":
+            starts = torch.arange(0, L, self.config.chunk_size, device=x.device)  # [S]
+            S = starts.shape[0]
 
-        # hard boundary decisions: 1 = new chunk STARTS at this position
-        boundaries_mask = probs + ((probs > 0.5).float() - probs).detach()  # [B, L]
-        boundaries_mask[:, 0] = 1.0  # position 0 always starts a chunk
+            select = torch.zeros(B, S, L, device=x.device)
+            select[:, torch.arange(S, device=x.device), starts] = 1.0
 
-        counts = boundaries_mask.sum(dim=-1).long()  # [B] number of chunks
-        S = counts.max().item()
+            boundary_positions = starts.unsqueeze(0).expand(B, S)
+            counts = torch.full((B,), S, device=x.device, dtype=torch.long)
 
-        # cumsum assigns each position to a chunk index (1-indexed)
-        cumsum = torch.cumsum(boundaries_mask.detach(), dim=-1)  # [B, L]
-        segment_indices = torch.arange(1, S + 1, device=x.device).view(1, S, 1)  # [1, S, 1]
-        assignment = (cumsum.unsqueeze(1) == segment_indices).float()  # [B, S, L]
+            return select, boundary_positions, None, counts
 
-        # multiply by boundaries_mask so gradients flow through STE
-        select = assignment * boundaries_mask.unsqueeze(1)  # [B, S, L]
+        elif self.config.chunk_method == "router":
 
+            logits = self.router(x).squeeze(-1)  # [B, L]
+            probs = torch.sigmoid(logits)  # [B, L]
+
+            boundaries_mask = probs + ((probs > 0.5).float() - probs).detach()  # [B, L]
+            boundaries_mask[:, 0] = 1.0 # force first token to be a boundary start
+
+            ### helpers to get the select matrix
+            counts = boundaries_mask.sum(dim=-1).long()  # [B]
+            S = counts.max().item()
+
+            cumsum = torch.cumsum(boundaries_mask.detach(), dim=-1)  # [B, L]
+            segment_indices = torch.arange(1, S + 1, device=x.device).view(1, S, 1)
+
+            assignment = (cumsum.unsqueeze(1) == segment_indices).float()  # [B, S, L]
+            select = assignment * boundaries_mask.unsqueeze(1)  # [B, S, L]
+            
+            boundary_positions = boundaries_mask.detach().argsort(
+                dim=-1, descending=True, stable=True
+            )[:, :S]
+            ###
+
+            return select, boundary_positions, probs, counts
+
+        else:
+            raise NotImplementedError(f"Unknown chunk_method: {self.config.chunk_method}")
+
+    def compress(self, x):
+        select, boundary_positions, probs, counts = self.chunk(x)
         compressed_x = select @ x  # [B, S, D]
-
-        # extract sorted start positions for the decoder
-        boundary_positions = boundaries_mask.detach().argsort(dim=-1, descending=True, stable=True)[:, :S]
-
         return compressed_x, boundary_positions, probs, counts
 
     def forward(self, x, cos, sin):

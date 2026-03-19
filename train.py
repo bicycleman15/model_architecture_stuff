@@ -24,12 +24,12 @@ class TrainConfig:
     tokenizer_name: str = "bicycleman15/tinystories-gpt4-clean-tokenizer"
 
     # model
-    block_size: int = 256
+    block_size: int = 64
     vocab_size: int = 75
     n_levels: int = 1
 
     # training  (64 * 512 = 32,768 tokens/step → 3,052 steps ≈ 100M tokens)
-    batch_size: int = 128
+    batch_size: int = 128 # 128
     train_iters: int = 15_000 # ~300M tokens now
     grad_accum: int = 1
     grad_norm: float = 1.0
@@ -132,9 +132,9 @@ def main():
 
     accelerator.print(model)
     accelerator.print(model_config)
-    accelerator.print(f"Parameters: {num_parameters(model):,}")
 
     accelerator.print("*****************************************************************")
+    accelerator.print(f"Parameters: {num_parameters(model):,}")
     accelerator.print(f"Using #GPUs: {accelerator.num_processes}")
     accelerator.print(f"Using Mixed Precision: {accelerator.mixed_precision}")
     accelerator.print(f"Batch size on single device: {cfg.batch_size}")
