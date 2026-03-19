@@ -1,6 +1,6 @@
-import einops
 import torch
 import torch.nn as nn
+import einops
 from dataclasses import dataclass
 from typing import Optional
 
@@ -167,20 +167,17 @@ class Decoder(nn.Module):
         B, K, D = x_processed.shape
         L = x_residual.shape[1]
 
-        # Expand chunk[i] to all positions in chunk[i].
+        # Expand chunk[i] to all positions in chunk[i] via indexing.
         # No causal shift: the compressed rep at start[i] only depends on
         # positions <= start[i], so broadcasting it to positions >= start[i] is causal.
-        batch_expanded = []
-        for b in range(B):
-            n = counts[b].item()
-            chunks = []
-            for i in range(n):
-                start = boundaries[b, i].item()
-                end = boundaries[b, i + 1].item() if i + 1 < n else L
-                chunk_size = end - start
-                chunks.append(einops.repeat(x_processed[b, i], 'd -> c d', c=chunk_size))
-            batch_expanded.append(torch.cat(chunks, dim=0))  # [L, D]
-        x = torch.stack(batch_expanded, dim=0)  # [B, L, D]
+        positions = einops.rearrange(torch.arange(L, device=x_processed.device), 'L -> 1 1 L')  # [1, 1, L]
+        starts = boundaries.unsqueeze(-1)  # [B, K, 1]
+        valid_mask = counts[:, None] > torch.arange(K, device=boundaries.device)[None, :]  # [B, K]
+        starts = torch.where(valid_mask.unsqueeze(-1), starts, L)  # junk boundaries are set as L (never triggered)
+        chunk_ids = (positions >= starts).sum(dim=1) - 1  # [B, L]
+
+        batch_idx = einops.repeat(torch.arange(B, device=x_processed.device), 'b -> b L', L=L)  # [B, L]
+        x = x_processed[batch_idx, chunk_ids]  # [B, L, D]
 
         # The expanded chunk representations are identical within each chunk.
         # Adding the compressor's full-length residual provides per-position
