@@ -29,8 +29,9 @@ class Config:
     chunk_method: str = "router"  # "uniform" or "router"
     chunk_size: int = 4           # fixed chunk size for uniform chunking
 
-    # processor: None = flat transformer blocks, or a Config for recursive nesting
-    processor_config: Optional['Config'] = None
+    # processor
+    processor_dim: Optional[int] = None  # dim the processor operates at (default: 3/2 * dim)
+    processor_config: Optional['Config'] = None  # None = flat transformer blocks, or a Config for recursive nesting
 
     # rope / norm
     rope_base: float = 10000
@@ -47,6 +48,9 @@ class Config:
 
         assert self.dim % self.n_head == 0
         self.head_dim = self.dim // self.n_head
+
+        if self.processor_dim is None:
+            self.processor_dim = (self.dim * 3) // 2
 
         self.padded_vocab_size = find_multiple(self.vocab_size, 256)
         self.rope_n_elem = self.head_dim
@@ -236,10 +240,25 @@ class HierarchicalModel(nn.Module):
         self.depth = depth
 
         self.compressor = Compressor(config)
+
+        proc_dim = config.processor_dim
+        self.up_proj = nn.Linear(config.dim, proc_dim, bias=False)
+        self.down_proj = nn.Linear(proc_dim, config.dim, bias=False)
+
         if config.processor_config is not None:
             self.processor = HierarchicalModel(config.processor_config, depth=depth + 1)
         else:
-            self.processor = Processor(config)
+            proc_config = Config(
+                block_size=config.block_size,
+                vocab_size=config.vocab_size,
+                dim=proc_dim,
+                n_head=config.n_head,
+                n_processor_layers=config.n_processor_layers,
+                rope_base=config.rope_base,
+                norm_eps=config.norm_eps,
+            )
+            self.processor = Processor(proc_config)
+
         self.decoder = Decoder(config)
 
     def setup_cache(self, device=None):
@@ -263,12 +282,16 @@ class HierarchicalModel(nn.Module):
 
         stats = {f"level_{self.depth}/avg_chunk_size": avg_chunk_size}
 
+        x_compressed = self.up_proj(x_compressed)
+
         processor_out = self.processor(x_compressed)
         if isinstance(processor_out, tuple):
             x_processed, inner_stats = processor_out
             stats.update(inner_stats)
         else:
             x_processed = processor_out
+
+        x_processed = self.down_proj(x_processed)
 
         out = self.decoder(x_processed, boundaries, counts, x, cos, sin, L)
 

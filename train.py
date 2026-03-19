@@ -24,14 +24,14 @@ class TrainConfig:
     tokenizer_name: str = "bicycleman15/tinystories-gpt4-clean-tokenizer"
 
     # model
-    block_size: int = 256
+    block_size: int = 512
     vocab_size: int = 75
+    dim: int = 768
     n_levels: int = 1
 
-    # training  (64 * 512 = 32,768 tokens/step → 3,052 steps ≈ 100M tokens)
-    batch_size: int = 256 # 128
-    train_iters: int = 8000 # ~300M tokens now
-    grad_accum: int = 4
+    batch_size: int = 128
+    train_iters: int = 8000 # ~500M tokens
+    grad_accum: int = 1
     grad_norm: float = 1.0
     seed: int = 42
 
@@ -54,31 +54,36 @@ class TrainConfig:
     wandb_run_name: str = "test"
 
 
-def build_config(vocab_size, block_size, n_levels):
+def build_config(vocab_size, block_size, n_levels, dim):
     """Recursively build a nested Config chain with n_levels of hierarchy."""
+    proc_dim = (dim * 3) // 2
+
     if n_levels <= 1:
         return Config(
             vocab_size=vocab_size,
             block_size=block_size,
+            dim=dim,
+            processor_dim=proc_dim,
             processor_config=None,
         )
 
-    max_chunk = 8 # this is not used for now
-    inner_block_size = block_size # for now it maches the global batch size
+    inner_block_size = block_size # for now it matches the global block size
 
     inner = build_config(
         vocab_size=vocab_size,
         block_size=inner_block_size,
         n_levels=n_levels - 1,
+        dim=proc_dim,
     )
 
     return Config(
         vocab_size=vocab_size,
         block_size=block_size,
+        dim=dim,
+        processor_dim=proc_dim,
         n_compressor_layers=3,
         n_processor_layers=6,
         n_decoder_layers=3,
-        max_chunk_size=max_chunk,
         processor_config=inner,
     )
 
@@ -127,7 +132,7 @@ def main():
     tokenizer = AutoTokenizer.from_pretrained(cfg.tokenizer_name)
 
     # model
-    model_config = build_config(cfg.vocab_size, cfg.block_size, cfg.n_levels)
+    model_config = build_config(cfg.vocab_size, cfg.block_size, cfg.n_levels, cfg.dim)
     model = HierarchicalLM(model_config)
 
     accelerator.print(model)
