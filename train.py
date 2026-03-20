@@ -1,7 +1,11 @@
 import os
 import time
-from dataclasses import dataclass
+import datetime
 from tqdm import tqdm
+
+import hydra
+from hydra.core.hydra_config import HydraConfig
+from omegaconf import DictConfig, OmegaConf
 
 import torch
 import torch.nn.functional as F
@@ -13,45 +17,17 @@ from transformers import AutoTokenizer
 from accelerate import Accelerator
 from accelerate.utils import DistributedDataParallelKwargs
 
-from utils import get_model, CycleIterator, validate, get_lr, num_parameters, seed_everything, visualize_boundaries
-
-
-@dataclass
-class TrainConfig:
-    # data
-    data_dir: str = "data/tinystories-gpt4-clean"
-    tokenizer_name: str = "bicycleman15/tinystories-gpt4-clean-tokenizer"
-
-    # model
-    model: str = "hourglass"
-    block_size: int = 512
-    vocab_size: int = 75
-    n_levels: int = 1
-    chunk_method: str = "spacebyte"
-
-    batch_size: int = 2
-    train_iters: int = 8000 # ~500M tokens
-    grad_accum: int = 1
-    grad_norm: float = 1.0
-    seed: int = 42
-
-    # optimizer
-    lr: float = 6e-4
-    min_lr: float = 1e-5
-    weight_decay: float = 0.1
-    warmup_iters: int = 500
-
-    # eval
-    eval_interval: int = 500
-    eval_iters: int = 50
-
-    # saving
-    save_dir: str = "checkpoints"
-    save_interval: int = 1000
-
-    # wandb
-    wandb_project: str = "hnet-tinystories"
-    wandb_run_name: str = "test"
+from models.utils import get_model
+from utils import (
+    CycleIterator,
+    validate,
+    get_lr,
+    num_parameters,
+    seed_everything,
+    visualize_boundaries,
+    get_experiment_name,
+    create_results_dir,
+)
 
 
 class TokenDataset(torch.utils.data.Dataset):
@@ -69,33 +45,56 @@ class TokenDataset(torch.utils.data.Dataset):
         return x.long(), y.long()
 
 
-def main():
-    cfg = TrainConfig()
+@hydra.main(config_path="config", config_name="byte", version_base=None)
+def main(cfg: DictConfig):
 
     ddp_kwargs = DistributedDataParallelKwargs(find_unused_parameters=True)
     accelerator = Accelerator(kwargs_handlers=[ddp_kwargs])
 
     seed_everything(cfg.seed)
 
+    if accelerator.is_main_process:
+        datetime_str = str(datetime.datetime.now())
+        experiment_name = get_experiment_name(cfg, datetime_str)
+        result_dir = create_results_dir(cfg, datetime_str)
+        cfg.result_dir = result_dir
+
+        OmegaConf.save(HydraConfig.get().overrides.task, os.path.join(result_dir, "overrides.yaml"))
+        OmegaConf.save(cfg, os.path.join(result_dir, "config.yaml"))
+        OmegaConf.save(cfg.model, os.path.join(result_dir, "model.yaml"))
+
+        wandb.init(
+            project=cfg.wandb.project,
+            name=experiment_name,
+            dir=result_dir,
+            config=OmegaConf.to_container(cfg, resolve=True),
+        )
+        wandb.define_metric("val_loss", summary="min")
+
+    accelerator.print(OmegaConf.to_container(cfg, resolve=True), "\n")
+
     # data
-    train_dataset = TokenDataset(os.path.join(cfg.data_dir, "train.pt"), cfg.block_size)
-    test_dataset = TokenDataset(os.path.join(cfg.data_dir, "test.pt"), cfg.block_size)
-    accelerator.print(f"Train tokens: {len(train_dataset.tokens):,} | Test tokens: {len(test_dataset.tokens):,}")
+    block_size = cfg.model.block_size
+    train_dataset = TokenDataset(os.path.join(cfg.dataset.path, "train.pt"), block_size)
+    test_dataset = TokenDataset(os.path.join(cfg.dataset.path, "test.pt"), block_size)
 
     g = torch.Generator()
     g.manual_seed(cfg.seed)
     train_loader = torch.utils.data.DataLoader(
-        train_dataset, batch_size=cfg.batch_size, shuffle=True, pin_memory=True, generator=g,
+        train_dataset, batch_size=cfg.train.batch_size, shuffle=True, pin_memory=True, generator=g,
     )
     test_loader = torch.utils.data.DataLoader(
-        test_dataset, batch_size=cfg.batch_size, shuffle=False, pin_memory=True,
+        test_dataset, batch_size=cfg.train.batch_size, shuffle=False, pin_memory=True,
     )
 
     train_loader = accelerator.prepare_data_loader(train_loader)
     train_iterator = CycleIterator(train_loader)
 
-    # tokenizer (for boundary visualization)
-    tokenizer = AutoTokenizer.from_pretrained(cfg.tokenizer_name)
+    if cfg.dataset.tokenizer_name == "byte":
+        from byte_tokenizer import ByteTokenizer
+        tokenizer = ByteTokenizer()
+    else:
+        tokenizer = AutoTokenizer.from_pretrained(cfg.dataset.tokenizer_name)
 
     # model
     model_config, model = get_model(cfg)
@@ -104,37 +103,67 @@ def main():
     accelerator.print(model_config)
 
     accelerator.print("*****************************************************************")
+    accelerator.print(f"Train tokens: {len(train_dataset.tokens):,} | Test tokens: {len(test_dataset.tokens):,}")
     accelerator.print(f"Parameters: {num_parameters(model):,}")
     accelerator.print(f"Using #GPUs: {accelerator.num_processes}")
     accelerator.print(f"Using Mixed Precision: {accelerator.mixed_precision}")
-    accelerator.print(f"Using block size: {cfg.block_size}")
-    accelerator.print(f"Batch size on single device: {cfg.batch_size}")
-    accelerator.print(f"Total effective batch size: {cfg.batch_size * accelerator.num_processes * cfg.grad_accum}")
-    accelerator.print(f"Gradient Accumulation steps: {cfg.grad_accum}")
-    accelerator.print(f"Train iters: {cfg.train_iters:,}")
-    accelerator.print(f"Optimization steps: {cfg.train_iters // cfg.grad_accum:,}")
-    accelerator.print(f"Tokens per iter: {cfg.batch_size * accelerator.num_processes * cfg.block_size:,}")
-    accelerator.print(f"Tokens per optimization step: {cfg.batch_size * accelerator.num_processes * cfg.block_size * cfg.grad_accum:,}")
-    accelerator.print(f"Total tokens in training: {cfg.train_iters * cfg.batch_size * accelerator.num_processes * cfg.block_size:,}")
+    accelerator.print(f"Using Model type: {cfg.model.name}")
+    accelerator.print()
+
+    accelerator.print(f"Using block size: {block_size}")
+    accelerator.print(f"Batch size on single device: {cfg.train.batch_size}")
+    accelerator.print(f"Total effective batch size: {cfg.train.batch_size * accelerator.num_processes * cfg.train.grad_accum}")
+    accelerator.print(f"Gradient Accumulation steps: {cfg.train.grad_accum}")
+    accelerator.print()
+
+    # determine total training iterations
+    if cfg.train.train_epochs > -1:
+        train_iters = cfg.train.train_epochs * len(train_loader)
+        accelerator.print(f"Using epoch-based training: {cfg.train.train_epochs} epochs x {len(train_loader)} iters/epoch = {train_iters:,} iters")
+    else:
+        train_iters = cfg.train.train_iters
+        accelerator.print(f"Using iter-based training: {train_iters:,} iters")
+    accelerator.print()
+
+    accelerator.print(f"Train iters: {train_iters:,}")
+    accelerator.print(f"Optimization steps: {train_iters // cfg.train.grad_accum:,}")
+    accelerator.print(f"Tokens per iter: {cfg.train.batch_size * accelerator.num_processes * block_size:,}")
+    accelerator.print(f"Tokens per optimization step: {cfg.train.batch_size * accelerator.num_processes * block_size * cfg.train.grad_accum:,}")
+    accelerator.print(f"Total tokens in training: {train_iters * cfg.train.batch_size * accelerator.num_processes * block_size:,}")
+    accelerator.print()
+
+    if cfg.train.grad_norm > 0:
+        accelerator.print(f"Using gradient clipping: {cfg.train.grad_norm}")
+    else:
+        accelerator.print("Not using gradient clipping")
+
+    if cfg.train.train_epochs > -1:
+        warmup_steps = int(train_iters * 0.1)
+        accelerator.print(f"Warmup iters (10% of {train_iters}): {warmup_steps}")
+    elif cfg.train.warmup_steps > 0:
+        warmup_steps = cfg.train.warmup_steps
+        accelerator.print(f"Warmup iters: {warmup_steps}")
+    else:
+        warmup_steps = int(train_iters * cfg.train.warmup_steps_percentage)
+        accelerator.print(f"Warmup iters ({cfg.train.warmup_steps_percentage} * {train_iters}): {warmup_steps}")
+
     accelerator.print("*****************************************************************")
 
     # optimizer
     optimizer = torch.optim.AdamW(
         [p for p in model.parameters() if p.requires_grad],
-        lr=cfg.lr, weight_decay=cfg.weight_decay, betas=(0.9, 0.95),
+        lr=cfg.optimizer.lr, weight_decay=cfg.optimizer.weight_decay, betas=cfg.optimizer.betas,
     )
 
     model, optimizer = accelerator.prepare(model, optimizer)
     accelerator.unwrap_model(model).setup_cache(device=accelerator.device)
 
-    # wandb (main process only)
-    if accelerator.is_main_process:
-        wandb.init(project=cfg.wandb_project, name=cfg.wandb_run_name, config=vars(cfg))
-
     accelerator.wait_for_everyone()
 
+    grad_accum = cfg.train.grad_accum
+
     # training loop
-    bar = tqdm(range(cfg.train_iters), desc="Training", disable=(not accelerator.is_main_process))
+    bar = tqdm(range(train_iters), desc="Training", disable=(not accelerator.is_main_process))
     for step in bar:
         input_ids, targets = next(train_iterator)
         input_ids = input_ids.to(accelerator.device, non_blocking=True)
@@ -142,10 +171,10 @@ def main():
 
         start_time = time.time()
 
-        if step % cfg.grad_accum == 0:
+        if step % grad_accum == 0:
             optimizer.zero_grad()
 
-        lr = get_lr(cfg.lr, step, cfg.warmup_iters, cfg.train_iters, cfg.min_lr)
+        lr = get_lr(cfg.optimizer.lr, step, warmup_steps, train_iters, cfg.optimizer.min_lr)
         for pg in optimizer.param_groups:
             pg["lr"] = lr
 
@@ -153,11 +182,11 @@ def main():
             logits, stats = model(input_ids)
             loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.view(-1))
 
-        accelerator.backward(loss / cfg.grad_accum)
+        accelerator.backward(loss / grad_accum)
 
-        if (step + 1) % cfg.grad_accum == 0:
-            if cfg.grad_norm > 0:
-                accelerator.clip_grad_norm_(model.parameters(), cfg.grad_norm)
+        if (step + 1) % grad_accum == 0:
+            if cfg.train.grad_norm > 0:
+                accelerator.clip_grad_norm_(model.parameters(), cfg.train.grad_norm)
             optimizer.step()
 
             time_taken = time.time() - start_time
@@ -177,35 +206,38 @@ def main():
         bar.set_postfix_str(f"loss={loss.item():.4f} lr={lr:.6f} {chunks_str}")
 
         # eval
-        if step > 0 and step % cfg.eval_interval == 0:
-            val_loss, val_ppl = validate(model, test_loader, accelerator.device, eval_iters=cfg.eval_iters)
+        if step > 0 and step % cfg.eval.eval_interval == 0:
+            val_loss, val_ppl = validate(model, test_loader, accelerator.device, eval_iters=cfg.eval.eval_iters)
             accelerator.print(f"\nStep {step}: val_loss={val_loss:.4f} ppl={val_ppl:.2f}")
             if accelerator.is_main_process:
                 wandb.log({"val/loss": val_loss, "val/perplexity": val_ppl})
 
             if accelerator.is_main_process:
-                if cfg.model == "hourglass":
-                    # only do for hourglass models
+                if cfg.model.name == "hourglass":
                     visualize_boundaries(accelerator.unwrap_model(model), test_loader, tokenizer, n=3)
 
         # save
-        if step > 0 and step % cfg.save_interval == 0:
+        if step > 0 and step % cfg.train.save_interval == 0:
             if accelerator.is_main_process:
-                os.makedirs(cfg.save_dir, exist_ok=True)
-                path = os.path.join(cfg.save_dir, f"step_{step:07d}.pt")
+                save_dir = cfg.result_dir if cfg.result_dir else "checkpoints"
+                os.makedirs(save_dir, exist_ok=True)
+                path = os.path.join(save_dir, f"step_{step:07d}.pt")
                 accelerator.save(accelerator.unwrap_model(model).state_dict(), path)
                 accelerator.print(f"\nSaved checkpoint: {path}")
             accelerator.wait_for_everyone()
 
     # final save & eval
     if accelerator.is_main_process:
-        os.makedirs(cfg.save_dir, exist_ok=True)
+        save_dir = cfg.result_dir if cfg.result_dir else "checkpoints"
+        os.makedirs(save_dir, exist_ok=True)
+        model_save_path = os.path.join(save_dir, "state_dict.pt")
         accelerator.save(
             accelerator.unwrap_model(model).state_dict(),
-            os.path.join(cfg.save_dir, "final.pt"),
+            model_save_path,
         )
+        accelerator.print(f"Training complete. Saved model at: {model_save_path}")
 
-    val_loss, val_ppl = validate(model, test_loader, accelerator.device)
+    val_loss, val_ppl = validate(model, test_loader, accelerator.device, eval_iters=cfg.eval.eval_iters)
     accelerator.print(f"Final: val_loss={val_loss:.4f} ppl={val_ppl:.2f}")
 
     accelerator.wait_for_everyone()

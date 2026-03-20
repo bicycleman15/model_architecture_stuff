@@ -2,6 +2,7 @@ import math
 import random
 import os
 
+import hydra
 import numpy as np
 import torch
 import torch.nn as nn
@@ -10,79 +11,20 @@ from typing_extensions import Self
 from tqdm import tqdm
 
 
-def build_hourglass_config(vocab_size, block_size, n_levels, dim=768):
-    # TODO: fix this ugly dim arg
-    """Recursively build a nested Config chain with n_levels of hierarchy."""
-    from hnet import Config
-
-    proc_dim = (dim * 3) // 2
-
-    if n_levels <= 1:
-        return Config(
-            vocab_size=vocab_size,
-            block_size=block_size,
-            dim=dim,
-            processor_dim=proc_dim,
-            processor_config=None,
-        )
-
-    inner_block_size = block_size
-
-    inner = build_hourglass_config(
-        vocab_size=vocab_size,
-        block_size=inner_block_size,
-        n_levels=n_levels - 1,
-        dim=proc_dim,
-    )
-
-    return Config(
-        vocab_size=vocab_size,
-        block_size=block_size,
-        dim=dim,
-        processor_dim=proc_dim,
-        n_compressor_layers=3,
-        n_processor_layers=6,
-        n_decoder_layers=3,
-        processor_config=inner,
-    )
+def get_experiment_name(cfg, datetime_str) -> str:
+    name = cfg.wandb.exp_name
+    name += f" {datetime_str}"
+    return name
 
 
-def get_model(config):
+def create_results_dir(cfg, datetime_str) -> str:
+    name = f"{datetime_str}"
+    name = "/".join(name.split(" "))
 
-    if config.model == "transformer":
-        from transformer import TransformerConfig, TransformerLM
-
-        model_config = TransformerConfig(
-            vocab_size=config.vocab_size,
-            block_size=config.block_size,
-        )
-        model = TransformerLM(model_config)
-        return model_config, model
-
-    elif config.model == "hourglass":
-        from hnet import HierarchicalLM
-
-        model_config = build_hourglass_config(
-            config.vocab_size, config.block_size, config.n_levels,
-        )
-
-        chunk_method = getattr(config, "chunk_method", "router")
-        model_config.chunk_method = chunk_method
-
-        if chunk_method == "spacebyte":
-            from transformers import AutoTokenizer
-            tokenizer = AutoTokenizer.from_pretrained(config.tokenizer_name)
-            vocab = tokenizer.get_vocab()
-            model_config.spacebyte_boundary_ids = tuple(
-                tid for token, tid in vocab.items()
-                if len(token) == 1 and not token.isalnum()
-            )
-
-        model = HierarchicalLM(model_config)
-        return model_config, model
-
-    else:
-        raise ValueError(f"Unknown model: {config.model}")
+    original_cwd = hydra.utils.get_original_cwd()
+    result_dir = os.path.join(original_cwd, cfg.results_dir, cfg.wandb.project, name)
+    os.makedirs(result_dir, exist_ok=True)
+    return result_dir
 
 
 def _decode_chunk(ids, tokenizer, bos_id, eos_id):

@@ -213,3 +213,5 @@ wandb/
 checkpoints/
 
 slurm_logs/
+
+Results/

@@ -4,7 +4,7 @@ import einops
 from dataclasses import dataclass
 from typing import Optional
 
-from transformer import TransformerBlock, RMSNorm, build_rope_cache, find_multiple
+from models.transformer import TransformerBlock, RMSNorm, build_rope_cache, find_multiple
 
 
 @dataclass

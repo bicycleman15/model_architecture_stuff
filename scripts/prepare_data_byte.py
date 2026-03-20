@@ -2,14 +2,17 @@
 Tokenize into byte tokens.
 
 Usage:
-    python prepare_data_byte.py
+    python scripts/prepare_data_byte.py
 
 """
 
 import os
+import sys
 import numpy as np
 import torch
 from itertools import chain
+
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from datasets import load_dataset
 

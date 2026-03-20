@@ -30,7 +30,7 @@ wandb:
 train:
 
     # Number of optimizer steps between saving checkpoints
-    save_interval: 1000
+    save_interval: 100000
 
     # Number of workers for loading data
     num_workers: 4
