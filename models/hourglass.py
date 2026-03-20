@@ -30,7 +30,7 @@ class Config:
     # compressor
     chunk_method: str = "router"  # "uniform", "router", or "spacebyte"
     chunk_size: int = 4           # fixed chunk size for uniform chunking
-    spacebyte_boundary_ids: Optional[tuple] = None  # token IDs that trigger chunk boundaries
+    bos_idx: int = 254  # BOS token index (always treated as a boundary for spacebyte)
 
     # processor
     processor_dim: Optional[int] = None  # dim the processor operates at (default: 3/2 * dim)
@@ -83,15 +83,6 @@ class Compressor(nn.Module):
             nn.SiLU(),
             nn.Linear(config.dim, 1),
         )
-
-        if config.chunk_method == "spacebyte":
-            assert config.spacebyte_boundary_ids is not None, (
-                "spacebyte requires spacebyte_boundary_ids in Config"
-            )
-            mask = torch.zeros(config.padded_vocab_size, dtype=torch.bool)
-            for tid in config.spacebyte_boundary_ids:
-                mask[tid] = True
-            self.register_buffer("boundary_vocab_mask", mask, persistent=False)
 
     def _boundaries_mask_to_select(self, boundaries_mask, device):
         """Convert a [B, L] binary boundary mask to the select matrix and positions."""
@@ -153,17 +144,20 @@ class Compressor(nn.Module):
         elif self.config.chunk_method == "spacebyte":
             assert input_ids is not None, "spacebyte chunking requires input_ids"
 
-            # look up which tokens are boundary characters (non-alphanumeric)
-            # via the pre-computed vocab mask from spacebyte_boundary_ids
-            is_boundary_char = self.boundary_vocab_mask[input_ids]  # [B, L]
+            # UTF-8 byte boundary detection (https://github.com/kjslag/spacebyte):
+            # non-alphanumeric ASCII bytes or UTF-8 multi-byte start bytes (>= 0xC0)
+            is_boundary = (
+                (input_ids < ord('0')) |
+                ((ord('9') < input_ids) & (input_ids < ord('A'))) |
+                ((ord('Z') < input_ids) & (input_ids < ord('a'))) |
+                ((ord('z') < input_ids) & (input_ids < 0b1000_0000)) |
+                (0b1100_0000 <= input_ids)
+            )
 
-            # SpaceByte convention: keep only the first of each
-            # consecutive non-alphanumeric group
-            is_boundary_char = is_boundary_char.clone()
-            is_boundary_char[:, 1:] &= is_boundary_char[:, :-1].bitwise_not()
-            is_boundary_char[:, 0] = True
+            is_boundary[:, 1:] &= is_boundary[:, :-1].bitwise_not()
+            is_boundary |= (input_ids == self.config.bos_idx)
 
-            boundaries_mask = is_boundary_char.float()
+            boundaries_mask = is_boundary.float()
             select, boundary_positions, counts = self._boundaries_mask_to_select(
                 boundaries_mask, x.device
             )

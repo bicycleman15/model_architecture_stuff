@@ -54,15 +54,6 @@ def get_model(cfg):
             use_qk_norm=use_qk_norm,
         )
 
-        if cfg.model.chunk_method == "spacebyte":
-            from transformers import AutoTokenizer
-            tokenizer = AutoTokenizer.from_pretrained(cfg.dataset.tokenizer_name)
-            vocab = tokenizer.get_vocab()
-            config.spacebyte_boundary_ids = tuple(
-                tid for token, tid in vocab.items()
-                if len(token) == 1 and not token.isalnum()
-            )
-
         model = HierarchicalLM(config)
         return config, model
 

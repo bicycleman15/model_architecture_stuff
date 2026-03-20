@@ -1,3 +1,4 @@
+import math
 import os
 import time
 import datetime
@@ -27,6 +28,7 @@ from utils import (
     visualize_boundaries,
     get_experiment_name,
     create_results_dir,
+    build_bytes_per_token,
 )
 
 
@@ -70,6 +72,7 @@ def main(cfg: DictConfig):
             config=OmegaConf.to_container(cfg, resolve=True),
         )
         wandb.define_metric("val_loss", summary="min")
+        wandb.define_metric("val/bpb", summary="min")
 
     accelerator.print(OmegaConf.to_container(cfg, resolve=True), "\n")
 
@@ -95,6 +98,11 @@ def main(cfg: DictConfig):
         tokenizer = ByteTokenizer()
     else:
         tokenizer = AutoTokenizer.from_pretrained(cfg.dataset.tokenizer_name)
+
+    accelerator.print(f"Building bytes-per-token table ...")
+    bytes_per_token = build_bytes_per_token(tokenizer).to(accelerator.device)
+    accelerator.print(f"Built bytes-per-token table (vocab_size={len(bytes_per_token)}, "
+                       f"mean={bytes_per_token.mean():.2f} bytes/token)")
 
     # model
     model_config, model = get_model(cfg)
@@ -193,8 +201,13 @@ def main(cfg: DictConfig):
             token_throughput = input_ids.shape[0] * input_ids.shape[1] / time_taken / 1000
 
             if accelerator.is_main_process:
+                num_tokens = targets.numel()
+                num_bytes = bytes_per_token[targets].sum().item()
+                train_bpb = loss.item() * num_tokens / num_bytes / math.log(2) if num_bytes > 0 else 0.0
+
                 log_dict = {
                     "train/loss": loss.item(),
+                    "train/bpb": train_bpb,
                     "train/lr": lr,
                     "perf/Ktokens_s": token_throughput,
                 }
@@ -202,15 +215,17 @@ def main(cfg: DictConfig):
                     log_dict[f"train/{k}"] = v
                 wandb.log(log_dict)
 
+        _num_bytes = bytes_per_token[targets].sum().item()
+        _bpb = loss.item() * targets.numel() / _num_bytes / math.log(2) if _num_bytes > 0 else 0.0
         chunks_str = " ".join(f"L{k.split('/')[0].split('_')[1]}={v:.1f}" for k, v in sorted(stats.items()))
-        bar.set_postfix_str(f"loss={loss.item():.4f} lr={lr:.6f} {chunks_str}")
+        bar.set_postfix_str(f"loss={loss.item():.4f} bpb={_bpb:.4f} lr={lr:.6f} {chunks_str}")
 
         # eval
         if step > 0 and step % cfg.eval.eval_interval == 0:
-            val_loss, val_ppl = validate(model, test_loader, accelerator.device, eval_iters=cfg.eval.eval_iters)
-            accelerator.print(f"\nStep {step}: val_loss={val_loss:.4f} ppl={val_ppl:.2f}")
+            val_loss, val_ppl, val_bpb = validate(model, test_loader, accelerator.device, eval_iters=cfg.eval.eval_iters, bytes_per_token=bytes_per_token)
+            accelerator.print(f"\nStep {step}: val_loss={val_loss:.4f} ppl={val_ppl:.2f} bpb={val_bpb:.4f}")
             if accelerator.is_main_process:
-                wandb.log({"val/loss": val_loss, "val/perplexity": val_ppl})
+                wandb.log({"val/loss": val_loss, "val/perplexity": val_ppl, "val/bpb": val_bpb})
 
             if accelerator.is_main_process:
                 if cfg.model.name == "hourglass":
@@ -237,13 +252,13 @@ def main(cfg: DictConfig):
         )
         accelerator.print(f"Training complete. Saved model at: {model_save_path}")
 
-    val_loss, val_ppl = validate(model, test_loader, accelerator.device, eval_iters=cfg.eval.eval_iters)
-    accelerator.print(f"Final: val_loss={val_loss:.4f} ppl={val_ppl:.2f}")
+    val_loss, val_ppl, val_bpb = validate(model, test_loader, accelerator.device, eval_iters=cfg.eval.eval_iters, bytes_per_token=bytes_per_token)
+    accelerator.print(f"Final: val_loss={val_loss:.4f} ppl={val_ppl:.2f} bpb={val_bpb:.4f}")
 
     accelerator.wait_for_everyone()
 
     if accelerator.is_main_process:
-        wandb.log({"val/loss": val_loss, "val/perplexity": val_ppl})
+        wandb.log({"val/loss": val_loss, "val/perplexity": val_ppl, "val/bpb": val_bpb})
         wandb.finish()
 
 

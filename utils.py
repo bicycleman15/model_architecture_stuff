@@ -86,10 +86,11 @@ def visualize_boundaries(model, val_dataloader, tokenizer, n=3):
 
 
 @torch.no_grad()
-def validate(model, val_dataloader, device, eval_iters=None):
+def validate(model, val_dataloader, device, eval_iters=None, bytes_per_token=None):
     model.eval()
     total_loss = 0.0
     total_tokens = 0
+    total_bytes = 0
 
     for i, (input_ids, targets) in enumerate(tqdm(val_dataloader, desc="Evaluating", total=eval_iters)):
         if eval_iters is not None and i >= eval_iters:
@@ -101,10 +102,19 @@ def validate(model, val_dataloader, device, eval_iters=None):
         total_loss += loss.item() * num_tokens
         total_tokens += num_tokens
 
+        if bytes_per_token is not None:
+            valid_targets = targets[targets != -100]
+            total_bytes += bytes_per_token[valid_targets].sum().item()
+
     val_loss = total_loss / total_tokens
     perplexity = math.exp(val_loss)
+
+    val_bpb = None
+    if bytes_per_token is not None and total_bytes > 0:
+        val_bpb = total_loss / total_bytes / math.log(2)
+
     model.train()
-    return val_loss, perplexity
+    return val_loss, perplexity, val_bpb
 
 
 def get_lr(learning_rate: float, it: int, warmup_iters: int, max_iters: int, min_lr: float) -> float:
@@ -155,3 +165,26 @@ def seed_everything(seed):
     torch.manual_seed(seed)
     torch.cuda.manual_seed(seed)
     torch.cuda.manual_seed_all(seed)
+
+
+def build_bytes_per_token(tokenizer):
+    """Build a lookup table mapping each token ID to its UTF-8 byte length.
+
+    For byte-level tokenizers every token is exactly 1 byte.
+    For BPE / sentencepiece tokenizers we decode each vocab entry and
+    measure its UTF-8 byte length, giving an exact per-token count.
+    """
+    from byte_tokenizer import ByteTokenizer
+
+    if isinstance(tokenizer, ByteTokenizer):
+        return torch.ones(tokenizer.vocab_size, dtype=torch.float32)
+
+    vocab_size = tokenizer.vocab_size
+    table = torch.zeros(vocab_size, dtype=torch.float32)
+    for token_id in range(vocab_size):
+        try:
+            text = tokenizer.decode([token_id])
+            table[token_id] = len(text.encode("utf-8"))
+        except Exception:
+            table[token_id] = 0
+    return table
