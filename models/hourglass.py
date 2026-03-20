@@ -1,10 +1,12 @@
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 import einops
 from dataclasses import dataclass
 from typing import Optional
 
 from models.transformer import TransformerBlock, RMSNorm, build_rope_cache, find_multiple
+from liger_kernel.transformers import LigerRMSNorm, LigerFusedLinearCrossEntropyLoss
 
 
 @dataclass
@@ -39,6 +41,10 @@ class Config:
     norm_eps: float = 1e-5
     rope_n_elem: Optional[int] = None
 
+    # optional
+    use_fused_ops: bool = False
+    use_qk_norm: bool = False
+
     def __post_init__(self):
         if self.n_local_heads == -1:
             self.n_local_heads = self.n_head
@@ -65,9 +71,12 @@ class Compressor(nn.Module):
         self.config = config
 
         self.layers = nn.ModuleList(
-            TransformerBlock(config) for _ in range(config.n_compressor_layers)
+            TransformerBlock(config, layer_idx=i) for i in range(config.n_compressor_layers)
         )
-        self.norm = RMSNorm(config.dim, eps=config.norm_eps)
+        if config.use_fused_ops:
+            self.norm = LigerRMSNorm(config.dim, eps=config.norm_eps)
+        else:
+            self.norm = RMSNorm(config.dim, eps=config.norm_eps)
 
         self.router = nn.Sequential(
             nn.Linear(config.dim, config.dim),
@@ -191,9 +200,12 @@ class Decoder(nn.Module):
         self.config = config
 
         self.layers = nn.ModuleList(
-            TransformerBlock(config) for _ in range(config.n_decoder_layers)
+            TransformerBlock(config, layer_idx=i) for i in range(config.n_decoder_layers)
         )
-        self.norm = RMSNorm(config.dim, eps=config.norm_eps)
+        if config.use_fused_ops:
+            self.norm = LigerRMSNorm(config.dim, eps=config.norm_eps)
+        else:
+            self.norm = RMSNorm(config.dim, eps=config.norm_eps)
 
     def forward(self, x_processed, boundaries, counts, x_residual, cos, sin, seq_len):
         # x_processed: [B, K, D]
@@ -236,9 +248,12 @@ class Processor(nn.Module):
         self.config = config
 
         self.layers = nn.ModuleList(
-            TransformerBlock(config) for _ in range(config.n_processor_layers)
+            TransformerBlock(config, layer_idx=i) for i in range(config.n_processor_layers)
         )
-        self.norm = RMSNorm(config.dim, eps=config.norm_eps)
+        if config.use_fused_ops:
+            self.norm = LigerRMSNorm(config.dim, eps=config.norm_eps)
+        else:
+            self.norm = RMSNorm(config.dim, eps=config.norm_eps)
 
     def setup_cache(self, device=None):
         cos, sin = build_rope_cache(
@@ -288,6 +303,8 @@ class HierarchicalModel(nn.Module):
                 n_processor_layers=config.n_processor_layers,
                 rope_base=config.rope_base,
                 norm_eps=config.norm_eps,
+                use_fused_ops=config.use_fused_ops,
+                use_qk_norm=config.use_qk_norm,
             )
             self.processor = Processor(proc_config)
 
@@ -341,12 +358,27 @@ class HierarchicalLM(nn.Module):
         self.model = HierarchicalModel(config)
         self.vocab = nn.Linear(config.dim, config.padded_vocab_size, bias=False)
 
+        if config.use_fused_ops:
+            self.fused_linear_cross_entropy = LigerFusedLinearCrossEntropyLoss(ignore_index=-100)
+
     def setup_cache(self, device=None):
         self.model.setup_cache(device=device)
 
-    def forward(self, input_ids):
+    def forward(self, input_ids, labels=None):
         x = self.emb(input_ids)  # [B, L, D]
         out, stats = self.model(x, input_ids=input_ids)  # [B, L, D], dict
+
+        if labels is not None:
+            if self.config.use_fused_ops:
+                loss = self.fused_linear_cross_entropy(
+                    self.vocab.weight, out.view(-1, out.size(-1)), labels.view(-1)
+                )
+                return loss, stats
+            else:
+                logits = self.vocab(out)
+                loss = F.cross_entropy(logits.view(-1, logits.size(-1)), labels.view(-1), ignore_index=-100)
+                return loss, stats
+
         logits = self.vocab(out)  # [B, L, V]
         return logits, stats
 

@@ -35,10 +35,6 @@ accelerate launch --config-file accelerate.yaml --mixed_precision=bf16 --num_pro
 wandb.project="fineweb-byte" \
 wandb.exp_name="test" \
 \
-dataset.path="/Users/jp7467/Desktop/model_architecture_stuff/data/tinystories-gpt4-clean" \
-dataset.tokenizer_name="bicycleman15/tinystories-gpt4-clean-tokenizer" \
-dataset.vocab_size=256 \
-\
 train.batch_size=32 \
 \
 train.train_epochs=1 \
@@ -50,8 +46,9 @@ optimizer.lr=8e-4 \
 optimizer.min_lr=8e-5 \
 \
 model_type=hourglass \
-hourglass.block_size=256 \
+hourglass.block_size=1024 \
 hourglass.chunk_method="uniform" \
+hourglass.chunk_size=4 \
 \
 hourglass.dim=512 \
 hourglass.n_head=8 \
