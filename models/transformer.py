@@ -155,15 +155,15 @@ class Transformer(nn.Module):
             if self.config.use_fused_ops:
                 loss = self.fused_linear_cross_entropy(
                     self.output.weight, x.view(-1, x.size(-1)), labels.view(-1)
-                ) # need to reshape to x to (B*N, D) and labels to (B*N)
-                return loss
+                )
+                return loss, {}
             else:
                 logits = self.output(x)
                 loss = F.cross_entropy(logits.view(-1, logits.size(-1)), labels.view(-1), ignore_index=-100)
-                return loss
+                return loss, {}
         
         logits = self.output(x)
-        return logits
+        return logits, {}
 
 
 class TransformerBlock(nn.Module):

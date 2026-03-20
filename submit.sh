@@ -1,10 +1,10 @@
 #!/bin/bash
-#SBATCH --job-name=hnet
+#SBATCH --job-name=byte
 #SBATCH --open-mode=append
 #SBATCH --output=slurm_logs/%j_%x.out
 #SBATCH --error=slurm_logs/%j_%x.err
 #SBATCH --export=ALL
-#SBATCH --time=24:00:00
+#SBATCH --time=4:00:00
 #SBATCH --gres=gpu:1
 #SBATCH --mem=128G
 #SBATCH --cpus-per-task=8
@@ -14,7 +14,27 @@
 # use `sbatch submit.slurm`
 # note we do not have WANDB_MODE=offline here because we are submitting the job to the cluster
 
-accelerate launch --config-file accelerate.yaml --mixed_precision=bf16 --num_processes=1 train.py
+accelerate launch --config-file accelerate.yaml --mixed_precision=bf16 --num_processes=1 train.py \
+--config-path config \
+--config-name byte.yaml \
+wandb.project="fineweb-byte" \
+wandb.exp_name="llamabyte" \
+\
+train.batch_size=32 \
+\
+train.train_epochs=1 \
+eval.eval_interval=2500 \
+eval.eval_iters=100 \
+train.grad_accum=8 \
+\
+optimizer.lr=8e-4 \
+optimizer.min_lr=8e-5 \
+\
+model_type=transformer \
+transformer.block_size=1024 \
+transformer.n_layer=6 \
+transformer.dim=768 \
+transformer.n_head=12
 
 echo "Run finished at: "
 date

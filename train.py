@@ -187,8 +187,7 @@ def main(cfg: DictConfig):
             pg["lr"] = lr
 
         with accelerator.autocast():
-            logits, stats = model(input_ids)
-            loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.view(-1))
+            loss, stats = model(input_ids, labels=targets)
 
         accelerator.backward(loss / grad_accum)
 
@@ -215,10 +214,10 @@ def main(cfg: DictConfig):
                     log_dict[f"train/{k}"] = v
                 wandb.log(log_dict)
 
-        _num_bytes = bytes_per_token[targets].sum().item()
-        _bpb = loss.item() * targets.numel() / _num_bytes / math.log(2) if _num_bytes > 0 else 0.0
-        chunks_str = " ".join(f"L{k.split('/')[0].split('_')[1]}={v:.1f}" for k, v in sorted(stats.items()))
-        bar.set_postfix_str(f"loss={loss.item():.4f} bpb={_bpb:.4f} lr={lr:.6f} {chunks_str}")
+            _num_bytes = bytes_per_token[targets].sum().item()
+            _bpb = loss.item() * targets.numel() / _num_bytes / math.log(2) if _num_bytes > 0 else 0.0
+            chunks_str = " ".join(f"L{k.split('/')[0].split('_')[1]}={v:.1f}" for k, v in sorted(stats.items()))
+            bar.set_postfix_str(f"loss={loss.item():.4f} bpb={_bpb:.4f} lr={lr:.6f} {chunks_str}")
 
         # eval
         if step > 0 and step % cfg.eval.eval_interval == 0:

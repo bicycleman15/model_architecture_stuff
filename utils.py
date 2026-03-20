@@ -97,8 +97,7 @@ def validate(model, val_dataloader, device, eval_iters=None, bytes_per_token=Non
             break
         input_ids, targets = input_ids.to(device), targets.to(device)
         num_tokens = (targets != -100).sum().item()
-        logits, _ = model(input_ids)
-        loss = torch.nn.functional.cross_entropy(logits.view(-1, logits.size(-1)), targets.view(-1))
+        loss, _ = model(input_ids, labels=targets)
         total_loss += loss.item() * num_tokens
         total_tokens += num_tokens
 

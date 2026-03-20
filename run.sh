@@ -7,25 +7,21 @@ accelerate launch --config-file accelerate.yaml --mixed_precision=bf16 --num_pro
 wandb.project="fineweb-byte" \
 wandb.exp_name="test" \
 \
-dataset.path="/Users/jp7467/Desktop/model_architecture_stuff/data/tinystories-gpt4-clean" \
-dataset.tokenizer_name="bicycleman15/tinystories-gpt4-clean-tokenizer" \
-dataset.vocab_size=256 \
-\
 train.batch_size=32 \
 \
 train.train_epochs=1 \
-eval.eval_interval=100 \
-eval.eval_iters=10 \
-train.grad_accum=2 \
+eval.eval_interval=2500 \
+eval.eval_iters=100 \
+train.grad_accum=8 \
 \
 optimizer.lr=8e-4 \
 optimizer.min_lr=8e-5 \
 \
 model_type=transformer \
-transformer.block_size=256 \
-transformer.n_layer=3 \
-transformer.dim=512 \
-transformer.n_head=8
+transformer.block_size=1024 \
+transformer.n_layer=6 \
+transformer.dim=768 \
+transformer.n_head=12
 
 # hourglass
 WANDB_MODE=offline \
@@ -39,7 +35,7 @@ train.batch_size=32 \
 \
 train.train_epochs=1 \
 eval.eval_interval=100 \
-eval.eval_iters=10 \
+eval.eval_iters=6000 \
 train.grad_accum=2 \
 \
 optimizer.lr=8e-4 \
@@ -47,7 +43,7 @@ optimizer.min_lr=8e-5 \
 \
 model_type=hourglass \
 hourglass.block_size=1024 \
-hourglass.chunk_method="uniform" \
+hourglass.chunk_method="spacebyte" \
 hourglass.chunk_size=4 \
 \
 hourglass.dim=512 \
