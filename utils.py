@@ -85,6 +85,28 @@ def get_model(config):
         raise ValueError(f"Unknown model: {config.model}")
 
 
+def _decode_chunk(ids, tokenizer, bos_id, eos_id):
+    """Decode a chunk of token ids, rendering BOS/EOS as <s>/<\s>."""
+    parts = []
+    text_buf = []
+    for t in ids:
+        if t == bos_id:
+            if text_buf:
+                parts.append(tokenizer.decode(text_buf, errors="replace"))
+                text_buf = []
+            parts.append("<s>")
+        elif t == eos_id:
+            if text_buf:
+                parts.append(tokenizer.decode(text_buf, errors="replace"))
+                text_buf = []
+            parts.append("</s>")
+        else:
+            text_buf.append(t)
+    if text_buf:
+        parts.append(tokenizer.decode(text_buf, errors="replace"))
+    return "".join(parts)
+
+
 @torch.no_grad()
 def visualize_boundaries(model, val_dataloader, tokenizer, n=3):
     """Show how the compressor chunks a sample, using | as delimiters."""
@@ -98,17 +120,24 @@ def visualize_boundaries(model, val_dataloader, tokenizer, n=3):
     sin = model.model.sin[:, :L]
     _, _, boundaries, counts, _ = model.model.compressor(x, cos, sin, input_ids=input_ids)
 
+    bos_id = getattr(tokenizer, "bos_idx", None) or getattr(tokenizer, "bos_token_id", None)
+    eos_id = getattr(tokenizer, "eos_idx", None) or getattr(tokenizer, "eos_token_id", None)
+
     for b in range(min(n, B)):
-        tokens = tokenizer.convert_ids_to_tokens(input_ids[b].tolist())
+        ids = input_ids[b].tolist()
         nc = counts[b].item()
-        bnd = set(boundaries[b, :nc].tolist())
+        bnd = sorted(boundaries[b, :nc].tolist())
 
         parts = []
-        for i, tok in enumerate(tokens):
-            if i in bnd and i > 0:
-                parts.append("|")
-            parts.append(tok)
-        print(f"[boundaries] chunks={nc}\n{''.join(parts)}\n")
+        prev = 0
+        for boundary in bnd:
+            chunk = ids[prev:boundary]
+            parts.append(_decode_chunk(chunk, tokenizer, bos_id, eos_id))
+            prev = boundary
+        chunk = ids[prev:]
+        parts.append(_decode_chunk(chunk, tokenizer, bos_id, eos_id))
+
+        print(f"[boundaries] chunks={nc}\n{'|'.join(parts)}\n")
     print()
 
     model.train()

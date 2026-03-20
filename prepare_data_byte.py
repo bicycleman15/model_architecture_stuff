@@ -1,8 +1,8 @@
 """
-Tokenize dataset.
+Tokenize into byte tokens.
 
 Usage:
-    python prepare_data.py
+    python prepare_data_byte.py
 
 """
 
@@ -11,15 +11,12 @@ import numpy as np
 import torch
 from itertools import chain
 
-from transformers import AutoTokenizer
 from datasets import load_dataset
 
-# use llama2 tokenizer
-tokenizer_name = "gpt2"
+from byte_tokenizer import ByteTokenizer
+tokenizer = ByteTokenizer()
 
-tokenizer = AutoTokenizer.from_pretrained(tokenizer_name)
-
-save_path = "data/fineweb-1b-gpt2"
+save_path = "data/fineweb-1b-byte"
 
 
 def preprocess_and_tokenize_batched(examples):
@@ -30,9 +27,8 @@ def preprocess_and_tokenize_batched(examples):
     - Pattern: [BOS] doc1 [BOS] doc2 [BOS] doc3 ...
     """
     texts = examples["text"]
-    input_ids = tokenizer(texts, return_attention_mask=False)["input_ids"]
-    bos = tokenizer.bos_token_id or tokenizer.eos_token_id
-    input_ids = [[bos] + ids for ids in input_ids]
+    results = tokenizer.encode(texts, add_bos=True)
+    input_ids = [r["input_ids"].tolist() for r in results]
     concatenated = list(chain(*input_ids))
     return {"input_ids": [concatenated]}
 
@@ -54,7 +50,7 @@ def tokenize_and_save(split, data, save_path, batch_size=1000):
 
     # each row is a concatenated batch; chain them all into a numpy array
     # (avoids ~180GB Python list overhead — numpy stores raw int64 values at 8 bytes each)
-    all_tokens = np.fromiter(chain(*tokenized_dataset["input_ids"]), dtype=np.int32)
+    all_tokens = np.fromiter(chain(*tokenized_dataset["input_ids"]), dtype=np.uint8)
     tokenized_dataset_tensor = torch.from_numpy(all_tokens)
 
     print(f"{split} tensor shape: {tokenized_dataset_tensor.shape}, dtype: {tokenized_dataset_tensor.dtype}")
