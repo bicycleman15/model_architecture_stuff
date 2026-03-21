@@ -297,8 +297,10 @@ class HierarchicalModel(nn.Module):
         self.compressor = Compressor(config)
 
         proc_dim = config.processor_dim
-        self.up_proj = nn.Linear(config.dim, proc_dim, bias=False)
-        self.down_proj = nn.Linear(proc_dim, config.dim, bias=False)
+        if proc_dim > config.dim:
+            self.pad_dimension = nn.Parameter(torch.zeros(proc_dim - config.dim))
+        else:
+            self.pad_dimension = None
 
         if config.processor_config is not None:
             self.processor = HierarchicalModel(config.processor_config, depth=depth + 1)
@@ -329,7 +331,7 @@ class HierarchicalModel(nn.Module):
         out_std = initializer_range / math.sqrt(n_residuals)
         print(f"[Init] depth={self.depth}: n_residuals={n_residuals} (parent={parent_residuals} + comp={self.config.n_compressor_layers * 2} + dec={self.config.n_decoder_layers * 2})")
         print(f"[Init]   compressor/decoder output proj std={out_std:.6f}, other linear std={initializer_range}")
-        print(f"[Init]   down_proj std={out_std:.6f}, up_proj std={initializer_range}, router std={initializer_range}")
+        print(f"[Init]   pad_dimension (zero-init), router std={initializer_range}")
 
         for block_list in [self.compressor.layers, self.decoder.layers]:
             for name, m in block_list.named_modules():
@@ -346,9 +348,6 @@ class HierarchicalModel(nn.Module):
                 nn.init.normal_(m.weight, mean=0.0, std=initializer_range)
                 if m.bias is not None:
                     nn.init.zeros_(m.bias)
-
-        nn.init.normal_(self.up_proj.weight, mean=0.0, std=initializer_range)
-        nn.init.normal_(self.down_proj.weight, mean=0.0, std=out_std)
 
         if isinstance(self.processor, HierarchicalModel):
             self.processor._init_weights(initializer_range, n_residuals)
@@ -395,6 +394,17 @@ class HierarchicalModel(nn.Module):
 
         self.processor.setup_cache(device=device)
 
+    def upsample(self, x):
+        if self.pad_dimension is not None:
+            x = torch.cat(
+                (x, self.pad_dimension.expand(x.shape[:-1] + (-1,))),
+                dim=-1,
+            )
+        return x
+
+    def downsample(self, x, target_dim):
+        return x[..., :target_dim]
+
     def forward(self, x, input_ids=None):
         # x: [B, L, D]
         B, L, D = x.shape
@@ -406,7 +416,7 @@ class HierarchicalModel(nn.Module):
 
         stats = {f"level_{self.depth}/avg_chunk_size": avg_chunk_size}
 
-        x_compressed = self.up_proj(x_compressed)
+        x_compressed = self.upsample(x_compressed)
 
         processor_out = self.processor(x_compressed)
         if isinstance(processor_out, tuple):
@@ -415,7 +425,7 @@ class HierarchicalModel(nn.Module):
         else:
             x_processed = processor_out
 
-        x_processed = self.down_proj(x_processed)
+        x_processed = self.downsample(x_processed, D)
 
         out = self.decoder(x_processed, boundaries, counts, x, cos, sin, L)
 

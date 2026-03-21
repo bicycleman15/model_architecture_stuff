@@ -29,7 +29,7 @@ accelerate launch --config-file accelerate.yaml --mixed_precision=bf16 --num_pro
 --config-path config \
 --config-name byte.yaml \
 wandb.project="fineweb-byte" \
-wandb.exp_name="spacebyte init" \
+wandb.exp_name="spacebyte res init lr 4e-4" \
 \
 train.batch_size=32 \
 \

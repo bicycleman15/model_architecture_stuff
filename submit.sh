@@ -6,7 +6,7 @@
 #SBATCH --export=ALL
 #SBATCH --time=4:00:00
 #SBATCH --gres=gpu:1
-#SBATCH --mem=128G
+#SBATCH --mem=32G
 #SBATCH --cpus-per-task=8
 #SBATCH --partition=a100_dev,a100_short,a100_long
 
@@ -14,11 +14,12 @@
 # use `sbatch submit.slurm`
 # note we do not have WANDB_MODE=offline here because we are submitting the job to the cluster
 
+# WANDB_MODE=offline \
 accelerate launch --config-file accelerate.yaml --mixed_precision=bf16 --num_processes=1 train.py \
 --config-path config \
 --config-name byte.yaml \
 wandb.project="fineweb-byte" \
-wandb.exp_name="spacebyte init" \
+wandb.exp_name="uniform-4 res init lr 8e-4" \
 \
 train.batch_size=32 \
 \
@@ -32,8 +33,8 @@ optimizer.min_lr=8e-5 \
 \
 model_type=hourglass \
 hourglass.block_size=1024 \
-hourglass.chunk_method="spacebyte" \
-hourglass.chunk_size=1 \
+hourglass.chunk_method="uniform" \
+hourglass.chunk_size=4 \
 \
 hourglass.dim=768 \
 hourglass.n_head=12 \
