@@ -23,6 +23,7 @@ from utils import (
     CycleIterator,
     validate,
     get_lr,
+    group_params,
     num_parameters,
     seed_everything,
     visualize_boundaries,
@@ -158,9 +159,14 @@ def main(cfg: DictConfig):
     accelerator.print("*****************************************************************")
 
     # optimizer
+    param_groups = group_params(model, weight_decay=cfg.optimizer.weight_decay)
+    accelerator.print(f"Optimizer param groups: {len(param_groups)}")
+    for i, pg in enumerate(param_groups):
+        n_params = sum(p.numel() for p in pg["params"])
+        accelerator.print(f"  group {i}: {n_params:,} params, lr_mult={pg.get('lr_multiplier', 1.0)}, wd={pg.get('weight_decay', cfg.optimizer.weight_decay)}")
     optimizer = torch.optim.AdamW(
-        [p for p in model.parameters() if p.requires_grad],
-        lr=cfg.optimizer.lr, weight_decay=cfg.optimizer.weight_decay, betas=cfg.optimizer.betas,
+        param_groups,
+        lr=cfg.optimizer.lr, betas=cfg.optimizer.betas,
     )
 
     model, optimizer = accelerator.prepare(model, optimizer)
@@ -184,7 +190,7 @@ def main(cfg: DictConfig):
 
         lr = get_lr(cfg.optimizer.lr, step, warmup_steps, train_iters, cfg.optimizer.min_lr)
         for pg in optimizer.param_groups:
-            pg["lr"] = lr
+            pg["lr"] = lr * pg.get("lr_multiplier", 1.0)
 
         with accelerator.autocast():
             loss, stats = model(input_ids, labels=targets)

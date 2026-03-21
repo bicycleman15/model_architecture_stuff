@@ -101,6 +101,8 @@ transformer:
     n_layer: 12
     n_head: 12
 
+    initializer_range: 0.02
+
     use_fused_ops: True
     use_qk_norm: True
 
@@ -127,6 +129,10 @@ hourglass:
     # processor
     processor_dim: null  # dim the processor operates at (default: 3/2 * dim)
     processor_config: null  # None = flat transformer blocks, or a Config for recursive nesting
+
+    # weight init / lr
+    initializer_range: 0.02
+    lr_multiplier: [2.0, 1.5, 1.0]  # per-stage LR multipliers [outer, middle, inner]
 
 
 # Populate the model settings based on selection in model_type

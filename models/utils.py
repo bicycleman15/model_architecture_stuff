@@ -12,6 +12,7 @@ def get_model(cfg):
     use_qk_norm = cfg.model.get("use_qk_norm", False)
 
     if name == "transformer":
+        initializer_range = cfg.model.get("initializer_range", 0.02)
         config = TransformerConfig(
             vocab_size=vocab_size,
             block_size=cfg.model.block_size,
@@ -20,6 +21,7 @@ def get_model(cfg):
             dim=cfg.model.dim,
             n_head=cfg.model.n_head,
 
+            initializer_range=initializer_range,
             norm_eps=norm_eps,
             
             use_fused_ops=use_fused_ops,
@@ -31,6 +33,8 @@ def get_model(cfg):
     elif name == "hourglass":
         proc_dim = cfg.model.get("processor_dim", None)
         proc_config_raw = cfg.model.get("processor_config", None)
+        initializer_range = cfg.model.get("initializer_range", 0.02)
+        lr_multiplier = cfg.model.get("lr_multiplier", None)
 
         config = HourglassConfig(
             vocab_size=vocab_size,
@@ -48,6 +52,9 @@ def get_model(cfg):
             processor_dim=proc_dim,
             processor_config=proc_config_raw,
 
+            initializer_range=initializer_range,
+            lr_multiplier=list(lr_multiplier) if lr_multiplier is not None else None,
+
             norm_eps=norm_eps,
 
             use_fused_ops=use_fused_ops,
@@ -55,6 +62,9 @@ def get_model(cfg):
         )
 
         model = HierarchicalLM(config)
+        model._init_weights(initializer_range)
+        if lr_multiplier is not None:
+            model.apply_lr_multiplier(list(lr_multiplier))
         return config, model
 
     else:

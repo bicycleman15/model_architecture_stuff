@@ -1,12 +1,22 @@
+import math
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import einops
 from dataclasses import dataclass
-from typing import Optional
+from typing import Optional, List
 
 from models.transformer import TransformerBlock, RMSNorm, build_rope_cache, find_multiple
 from liger_kernel.transformers import LigerRMSNorm, LigerFusedLinearCrossEntropyLoss
+
+
+def apply_optimization_params(param: torch.Tensor, **kwargs) -> None:
+    """Annotate a parameter with per-param optimizer settings (e.g. lr_multiplier, weight_decay)."""
+    if hasattr(param, "_optim"):
+        param._optim.update(kwargs)
+    else:
+        param._optim = kwargs
 
 
 @dataclass
@@ -40,6 +50,10 @@ class Config:
     rope_base: float = 10000
     norm_eps: float = 1e-5
     rope_n_elem: Optional[int] = None
+
+    # weight init / lr
+    initializer_range: float = 0.02
+    lr_multiplier: Optional[List[float]] = None
 
     # optional
     use_fused_ops: bool = False
@@ -304,6 +318,73 @@ class HierarchicalModel(nn.Module):
 
         self.decoder = Decoder(config)
 
+    def _init_weights(self, initializer_range: float = 0.02, parent_residuals: int = 0):
+        """Depth-scaled weight initialization approach (taken from H-Net arxiv).
+
+        Output projections (wo, proj) that add to the residual stream are scaled
+        by 1/sqrt(n_residuals) where n_residuals counts total residual-stream
+        additions across all stages.
+        """
+        n_residuals = parent_residuals + self.config.n_compressor_layers * 2 + self.config.n_decoder_layers * 2
+        out_std = initializer_range / math.sqrt(n_residuals)
+        print(f"[Init] depth={self.depth}: n_residuals={n_residuals} (parent={parent_residuals} + comp={self.config.n_compressor_layers * 2} + dec={self.config.n_decoder_layers * 2})")
+        print(f"[Init]   compressor/decoder output proj std={out_std:.6f}, other linear std={initializer_range}")
+        print(f"[Init]   down_proj std={out_std:.6f}, up_proj std={initializer_range}, router std={initializer_range}")
+
+        for block_list in [self.compressor.layers, self.decoder.layers]:
+            for name, m in block_list.named_modules():
+                if isinstance(m, nn.Linear):
+                    if name.endswith(".wo") or name.endswith(".proj"):
+                        nn.init.normal_(m.weight, mean=0.0, std=out_std)
+                    else:
+                        nn.init.normal_(m.weight, mean=0.0, std=initializer_range)
+                    if m.bias is not None:
+                        nn.init.zeros_(m.bias)
+
+        for m in self.compressor.router.modules():
+            if isinstance(m, nn.Linear):
+                nn.init.normal_(m.weight, mean=0.0, std=initializer_range)
+                if m.bias is not None:
+                    nn.init.zeros_(m.bias)
+
+        nn.init.normal_(self.up_proj.weight, mean=0.0, std=initializer_range)
+        nn.init.normal_(self.down_proj.weight, mean=0.0, std=out_std)
+
+        if isinstance(self.processor, HierarchicalModel):
+            self.processor._init_weights(initializer_range, n_residuals)
+        else:
+            proc_n_residuals = n_residuals + self.processor.config.n_processor_layers * 2
+            proc_out_std = initializer_range / math.sqrt(proc_n_residuals)
+            print(f"[Init] depth={self.depth + 1} (processor): n_residuals={proc_n_residuals} (outer={n_residuals} + proc={self.processor.config.n_processor_layers * 2})")
+            print(f"[Init]   processor output proj std={proc_out_std:.6f}, other linear std={initializer_range}")
+            for name, m in self.processor.named_modules():
+                if isinstance(m, nn.Linear):
+                    if name.endswith(".wo") or name.endswith(".proj"):
+                        nn.init.normal_(m.weight, mean=0.0, std=proc_out_std)
+                    else:
+                        nn.init.normal_(m.weight, mean=0.0, std=initializer_range)
+                    if m.bias is not None:
+                        nn.init.zeros_(m.bias)
+
+    def _apply_lr_multiplier(self, lr_multiplier: List[float]):
+        """Tag all parameters at this depth with the corresponding LR multiplier.
+
+        Parameters belonging to deeper stages are first tagged with the current
+        stage's multiplier, then overwritten by the recursive call.
+        """
+        n_outer = sum(p.numel() for p in self.parameters())
+        print(f"[LR mult] depth={self.depth}: tagging {n_outer:,} params with lr_multiplier={lr_multiplier[self.depth]}")
+        for param in self.parameters():
+            apply_optimization_params(param, lr_multiplier=lr_multiplier[self.depth])
+
+        if isinstance(self.processor, HierarchicalModel):
+            self.processor._apply_lr_multiplier(lr_multiplier)
+        else:
+            n_proc = sum(p.numel() for p in self.processor.parameters())
+            print(f"[LR mult] depth={self.depth + 1} (processor): overwriting {n_proc:,} params with lr_multiplier={lr_multiplier[self.depth + 1]}")
+            for param in self.processor.parameters():
+                apply_optimization_params(param, lr_multiplier=lr_multiplier[self.depth + 1])
+
     def setup_cache(self, device=None):
         cos, sin = build_rope_cache(
             self.config.block_size, self.config.rope_n_elem,
@@ -354,6 +435,21 @@ class HierarchicalLM(nn.Module):
 
         if config.use_fused_ops:
             self.fused_linear_cross_entropy = LigerFusedLinearCrossEntropyLoss(ignore_index=-100)
+
+    def _init_weights(self, initializer_range: float = 0.02):
+        print(f"[Init] HierarchicalLM: emb std={initializer_range}, vocab std={initializer_range}")
+        nn.init.normal_(self.emb.weight, mean=0.0, std=initializer_range)
+        nn.init.normal_(self.vocab.weight, mean=0.0, std=initializer_range)
+        self.model._init_weights(initializer_range)
+
+    def apply_lr_multiplier(self, lr_multiplier: List[float]):
+        """Apply per-stage LR multipliers. Must be called before creating optimizer param groups."""
+        print(f"[LR mult] HierarchicalLM: emb/vocab lr_multiplier={lr_multiplier[0]}")
+        for param in self.emb.parameters():
+            apply_optimization_params(param, lr_multiplier=lr_multiplier[0])
+        for param in self.vocab.parameters():
+            apply_optimization_params(param, lr_multiplier=lr_multiplier[0])
+        self.model._apply_lr_multiplier(lr_multiplier)
 
     def setup_cache(self, device=None):
         self.model.setup_cache(device=device)

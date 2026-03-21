@@ -116,6 +116,51 @@ def validate(model, val_dataloader, device, eval_iters=None, bytes_per_token=Non
     return val_loss, perplexity, val_bpb
 
 
+def group_params(model, weight_decay):
+    """Create optimizer param groups respecting per-param _optim annotations.
+
+    Groups parameters by unique (lr_multiplier, weight_decay) tuples.
+    Bias and norm parameters always get weight_decay=0.
+    Parameters without _optim annotations get default values
+    (lr_multiplier=1.0, weight_decay=weight_decay).
+    """
+    from models.hourglass import apply_optimization_params
+
+    for name, param in model.named_parameters():
+        if not param.requires_grad:
+            continue
+        if not hasattr(param, "_optim"):
+            param._optim = {}
+        if name.endswith(".bias") or ".norm." in name or "norm.weight" in name:
+            apply_optimization_params(param, weight_decay=0.0)
+
+    all_keys = set()
+    for param in model.parameters():
+        if param.requires_grad and hasattr(param, "_optim"):
+            all_keys.update(param._optim.keys())
+    all_keys = sorted(all_keys)
+
+    all_tuples = []
+    param_groups = []
+
+    for name, param in model.named_parameters():
+        if not param.requires_grad:
+            continue
+        optim_dict = getattr(param, "_optim", {})
+        current_tuple = tuple(optim_dict.get(key, None) for key in all_keys)
+        if current_tuple not in all_tuples:
+            all_tuples.append(current_tuple)
+            group = {"params": [param], **optim_dict}
+            group.setdefault("weight_decay", weight_decay)
+            group.setdefault("lr_multiplier", 1.0)
+            param_groups.append(group)
+        else:
+            idx = all_tuples.index(current_tuple)
+            param_groups[idx]["params"].append(param)
+
+    return param_groups
+
+
 def get_lr(learning_rate: float, it: int, warmup_iters: int, max_iters: int, min_lr: float) -> float:
     if it < warmup_iters:
         return learning_rate * it / warmup_iters

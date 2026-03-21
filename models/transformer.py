@@ -64,6 +64,9 @@ class TransformerConfig:
     norm_eps: float = 1e-5
     rope_n_elem: Optional[int] = None
 
+    # weight init
+    initializer_range: float = 0.02
+
     # optional
     use_fused_ops: bool = False
     use_qk_norm: bool = False
@@ -100,8 +103,26 @@ class Transformer(nn.Module):
             self.fused_linear_cross_entropy = LigerFusedLinearCrossEntropyLoss(ignore_index=-100)
         
         # initialize weights
-        self.apply(lambda m: _init_weights(m, self.config.n_layer, self.config.dim))
+        self._init_weights(self.config.initializer_range)
         self.get_mask_mod = get_mask_mod
+
+    def _init_weights(self, initializer_range: float = 0.02):
+        n_residuals = self.config.n_layer * 2
+        out_std = initializer_range / math.sqrt(n_residuals)
+        print(f"[Init] Transformer: n_residuals={n_residuals}, output proj std={out_std:.6f}, other linear std={initializer_range}")
+        print(f"[Init]   emb std={initializer_range}, lm_head std={initializer_range}")
+
+        nn.init.normal_(self.wte.weight, mean=0.0, std=initializer_range)
+        nn.init.normal_(self.output.weight, mean=0.0, std=initializer_range)
+
+        for name, m in self.layers.named_modules():
+            if isinstance(m, nn.Linear):
+                if name.endswith(".wo") or name.endswith(".proj"):
+                    nn.init.normal_(m.weight, mean=0.0, std=out_std)
+                else:
+                    nn.init.normal_(m.weight, mean=0.0, std=initializer_range)
+                if m.bias is not None:
+                    nn.init.zeros_(m.bias)
 
     def setup_cache(self, device=None):
         # force in fp32
@@ -349,24 +370,6 @@ class KVCache(nn.Module):
 
         return k_out, v_out
 
-# https://arxiv.org/abs/2204.06745 : Section 2.1.3
-# taken from: https://github.com/jzhang38/TinyLlama/blob/bf122247c486b6b897050e98cbb7bedae8eeba73/lit_gpt/model.py#L40
-def _init_weights(module: nn.Module, n_layer: int, dim: int) -> None:
-    """Meant to be used with `gpt.apply(gpt._init_weights)`."""
-    # GPT-NeoX  https://arxiv.org/pdf/2204.06745.pdf
-    if isinstance(module, nn.Embedding):
-        torch.nn.init.normal_(module.weight, mean=0.0, std=math.sqrt(2.0 / 5 / dim))
-        # RWKV: set it to 1e-4
-        # torch.nn.init.uniform_(module.weight,  -1e-4, 1e-4)
-    elif isinstance(module, nn.Linear):
-        torch.nn.init.normal_(module.weight, mean=0.0, std=math.sqrt(2.0 / 5 / dim))
-        if module.bias is not None:
-            torch.nn.init.zeros_(module.bias)
-
-    # GPT-NeoX
-    for name, p in module.named_parameters():
-        if (name == "wo.weight" and isinstance(module, Attention)) or (name == "proj.weight" and (isinstance(module, LLaMAMLP) or isinstance(module, LigerSwiGLUMLP))):
-            nn.init.normal_(p, mean=0.0, std=(1 / math.sqrt(dim) / n_layer))
 
 
 ################################################################################################################
