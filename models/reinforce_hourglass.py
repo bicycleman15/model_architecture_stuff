@@ -5,7 +5,7 @@ Implements the method from "You Can Learn Tokenization End-to-End with Reinforce
 
 Instead of straight-through estimation for token boundaries, uses stochastic sampling with REINFORCE policy gradient. 
 
-A baseline vocab head on compressor output provides variance reduction, combined with time-discounted per-position rewards.
+An auxiliary vocab head on compressor output provides variance reduction, combined with time-discounted per-position rewards.
 """
 
 import math
@@ -137,18 +137,18 @@ class ReinforceHierarchicalLM(HierarchicalLM):
         super().__init__(config)
         self.model = ReinforceHierarchicalModel(config)
         if config.use_auxiliary_vocab:
-            self.baseline_vocab = nn.Linear(config.dim, config.padded_vocab_size, bias=False)
+            self.aux_vocab = nn.Linear(config.dim, config.padded_vocab_size, bias=False)
 
     def _init_weights(self, initializer_range: float = 0.02):
         super()._init_weights(initializer_range)
         if self.config.use_auxiliary_vocab:
-            print(f"[Init] ReinforceHierarchicalLM: baseline_vocab std={initializer_range}")
-            nn.init.normal_(self.baseline_vocab.weight, mean=0.0, std=initializer_range)
+            print(f"[Init] ReinforceHierarchicalLM: aux_vocab std={initializer_range}")
+            nn.init.normal_(self.aux_vocab.weight, mean=0.0, std=initializer_range)
 
     def apply_lr_multiplier(self, lr_multiplier: List[float]):
         super().apply_lr_multiplier(lr_multiplier)
         if self.config.use_auxiliary_vocab:
-            for param in self.baseline_vocab.parameters():
+            for param in self.aux_vocab.parameters():
                 apply_optimization_params(param, lr_multiplier=lr_multiplier[0])
 
     def _compute_discounted_returns(self, advantage, gamma):
@@ -186,17 +186,17 @@ class ReinforceHierarchicalLM(HierarchicalLM):
 
             # --- REINFORCE loss ---
             if self.config.use_auxiliary_vocab:
-                baseline_logits = self.baseline_vocab(compressor_hidden)
-                baseline_per_pos = F.cross_entropy(
-                    baseline_logits.view(-1, baseline_logits.size(-1)),
+                aux_logits = self.aux_vocab(compressor_hidden)
+                aux_per_pos = F.cross_entropy(
+                    aux_logits.view(-1, aux_logits.size(-1)),
                     labels.view(-1),
                     ignore_index=-100,
                     reduction="none",
                 ).view(B, L)
-                baseline_ce = baseline_per_pos.mean()
-                advantage = (per_pos_loss - baseline_per_pos).detach()
+                aux_ce = aux_per_pos.mean()
+                advantage = (per_pos_loss - aux_per_pos).detach()
             else:
-                baseline_ce = torch.tensor(0.0, device=per_pos_loss.device)
+                aux_ce = torch.tensor(0.0, device=per_pos_loss.device)
                 advantage = per_pos_loss.detach()
 
             gamma = self.config.reinforce_gamma
@@ -219,12 +219,12 @@ class ReinforceHierarchicalLM(HierarchicalLM):
 
                 # below are rest of the stuff we want to do besides maximize the expectation
                 # all hps are according to the paper
-                + (0.1 * baseline_ce)
+                + (0.1 * aux_ce)
                 + (0.01 * target_rate_loss)
             )
 
             stats["reinforce/ce_loss"] = ce_loss.item()
-            stats["reinforce/baseline_loss"] = baseline_ce.item()
+            stats["reinforce/aux_loss"] = aux_ce.item()
             stats["reinforce/reinforce_loss"] = reinforce_loss.item()
             stats["reinforce/target_rate_loss"] = target_rate_loss.item()
             stats["reinforce/mean_boundary_prob"] = mean_prob.item()
