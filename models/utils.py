@@ -100,8 +100,12 @@ def get_model(cfg):
             use_qk_norm=use_qk_norm,
 
             reinforce_gamma=cfg.model.reinforce_gamma,
+            reinforce_weight=cfg.model.reinforce_weight,
+            aux_weight=cfg.model.aux_weight,
             target_downsample_rate=cfg.model.target_downsample_rate,
+            target_rate_weight=cfg.model.target_rate_weight,
             use_auxiliary_vocab=cfg.model.use_auxiliary_vocab,
+            use_router_scaling=cfg.model.use_router_scaling,
             router_logit_scale=cfg.model.router_logit_scale,
             router_softcap=cfg.model.router_softcap,
         )

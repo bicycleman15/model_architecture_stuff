@@ -30,10 +30,14 @@ from models.hourglass import (
 class ReinforceConfig(Config):
     # new hps
     reinforce_gamma: float = 0.99
+    reinforce_weight: float = 0.01
+    aux_weight: float = 0.1
     target_downsample_rate: float = 0.2
+    target_rate_weight: float = 0.01
     use_auxiliary_vocab: bool = True
 
     # handle router logits/probs
+    use_router_scaling: bool = True
     router_logit_scale: float = 16.0
     router_softcap: float = 50.0
 
@@ -55,15 +59,18 @@ class ReinforceCompressor(Compressor):
 
         raw_logits = self.router(x).squeeze(-1)  # [B, L]
 
-        # Eq 18: scale raw logits and bias toward target downsample rate
-        logit_bias = math.log(self.config.target_downsample_rate
-                              / (1.0 - self.config.target_downsample_rate))
-        logits = raw_logits / self.config.router_logit_scale + logit_bias
+        if self.config.use_router_scaling:
+            # Eq 18: scale raw logits and bias toward target downsample rate
+            logit_bias = math.log(self.config.target_downsample_rate
+                                  / (1.0 - self.config.target_downsample_rate))
+            logits = raw_logits / self.config.router_logit_scale + logit_bias
 
-        # Eq 19: softcap to prevent exploding logits (training only)
-        if self.training and self.config.router_softcap > 0:
-            cap = self.config.router_softcap
-            logits = cap * torch.tanh(logits / cap)
+            # Eq 19: softcap to prevent exploding logits (training only)
+            if self.training and self.config.router_softcap > 0:
+                cap = self.config.router_softcap
+                logits = cap * torch.tanh(logits / cap)
+        else:
+            logits = raw_logits
 
         probs = torch.sigmoid(logits)  # [B, L]
 
@@ -216,12 +223,12 @@ class ReinforceHierarchicalLM(HierarchicalLM):
 
             total_loss = (
                 ce_loss # log p_theta maximize
-                + (0.01 * reinforce_loss) # reward * log a_theta -- papers says it uses a small values here since it wants to "encourage exploration"
+                + self.config.reinforce_weight * reinforce_loss
 
                 # below are rest of the stuff we want to do besides maximize the expectation
                 # all hps are according to the paper
-                + (0.1 * aux_ce)
-                + (0.01 * target_rate_loss)
+                + self.config.aux_weight * aux_ce
+                + self.config.target_rate_weight * target_rate_loss
             )
 
             stats["reinforce/ce_loss"] = ce_loss.item()

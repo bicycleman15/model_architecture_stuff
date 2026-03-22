@@ -164,8 +164,12 @@ reinforce_hourglass:
 
     # REINFORCE hyperparameters
     reinforce_gamma: 0.99
+    reinforce_weight: 0.01
+    aux_weight: 0.1
     target_downsample_rate: 0.2
+    target_rate_weight: 0.01
     use_auxiliary_vocab: True
+    use_router_scaling: True    # Eq 18-19: logit scaling + softcap
     router_logit_scale: 16.0   # D in Eq 18
     router_softcap: 50.0       # training-only softcap (Eq 19)
 
