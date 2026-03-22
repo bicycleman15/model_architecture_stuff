@@ -60,7 +60,8 @@ def visualize_boundaries(model, val_dataloader, tokenizer, n=3):
     B, L, D = x.shape
     cos = model.model.cos[:, :L]
     sin = model.model.sin[:, :L]
-    _, _, boundaries, counts, _ = model.model.compressor(x, cos, sin, input_ids=input_ids)
+    compressor_out = model.model.compressor(x, cos, sin, input_ids=input_ids)
+    boundaries, counts = compressor_out[2], compressor_out[3]
 
     bos_id = getattr(tokenizer, "bos_idx", None) or getattr(tokenizer, "bos_token_id", None)
     eos_id = getattr(tokenizer, "eos_idx", None) or getattr(tokenizer, "eos_token_id", None)
@@ -97,8 +98,9 @@ def validate(model, val_dataloader, device, eval_iters=None, bytes_per_token=Non
             break
         input_ids, targets = input_ids.to(device), targets.to(device)
         num_tokens = (targets != -100).sum().item()
-        loss, _ = model(input_ids, labels=targets)
-        total_loss += loss.item() * num_tokens
+        loss, stats = model(input_ids, labels=targets)
+        ce_loss = stats.get("reinforce/ce_loss", loss.item())
+        total_loss += ce_loss * num_tokens
         total_tokens += num_tokens
 
         if bytes_per_token is not None:

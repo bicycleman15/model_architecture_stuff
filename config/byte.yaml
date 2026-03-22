@@ -135,5 +135,39 @@ hourglass:
     lr_multiplier: [2.0, 1.5, 1.0]  # per-stage LR multipliers [outer, middle, inner]
 
 
+reinforce_hourglass:
+    name: reinforce_hourglass
+
+    block_size: 2048
+
+    use_fused_ops: True
+    use_qk_norm: True
+
+    dim: 768
+    n_head: 12
+
+    n_compressor_layers: 3
+    n_processor_layers: 6
+    n_decoder_layers: 3
+
+    # chunking (must be "router" for REINFORCE)
+    chunk_method: "router"
+    chunk_size: 4
+
+    # processor
+    processor_dim: null
+    processor_config: null
+
+    # weight init / lr
+    initializer_range: 0.02
+    lr_multiplier: [2.0, 1.5, 1.0]
+
+    # REINFORCE hyperparameters
+    reinforce_gamma: 0.99
+    target_downsample_rate: 0.2
+    router_logit_scale: 16.0   # D in Eq 18
+    router_softcap: 50.0       # training-only softcap (Eq 19)
+
+
 # Populate the model settings based on selection in model_type
 model: ${${model_type}}
