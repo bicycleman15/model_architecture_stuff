@@ -53,7 +53,7 @@ class ReinforceCompressor(Compressor):
     def chunk(self, x, input_ids=None):
         if self.config.chunk_method != "router":
             select, boundary_positions, probs, counts = super().chunk(x, input_ids)
-            return select, boundary_positions, probs, counts, None
+            return select, boundary_positions, probs, counts, None, None
 
         B, L, D = x.shape
 
@@ -87,22 +87,22 @@ class ReinforceCompressor(Compressor):
         select, boundary_positions, counts = self._boundaries_mask_to_select(
             boundaries_mask, x.device
         )
-        return select, boundary_positions, probs, counts, log_probs
+        return select, boundary_positions, probs, counts, log_probs, logits
 
     def compress(self, x, input_ids=None):
-        select, boundary_positions, probs, counts, log_probs = self.chunk(x, input_ids=input_ids)
+        select, boundary_positions, probs, counts, log_probs, logits = self.chunk(x, input_ids=input_ids)
         compressed_x = select @ x  # [B, S, D]
-        return compressed_x, boundary_positions, probs, counts, log_probs
+        return compressed_x, boundary_positions, probs, counts, log_probs, logits
 
     def forward(self, x, cos, sin, input_ids=None):
         for layer in self.layers:
             x = layer(x, cos, sin)
         x = self.norm(x)
 
-        compressed_x, boundaries, probs, counts, log_probs = self.compress(x, input_ids=input_ids)
+        compressed_x, boundaries, probs, counts, log_probs, logits = self.compress(x, input_ids=input_ids)
         avg_chunk_size = x.shape[1] / counts.float().mean().item()
 
-        return x, compressed_x, boundaries, counts, avg_chunk_size, probs, log_probs
+        return x, compressed_x, boundaries, counts, avg_chunk_size, probs, log_probs, logits
 
 
 class ReinforceHierarchicalModel(HierarchicalModel):
@@ -117,7 +117,7 @@ class ReinforceHierarchicalModel(HierarchicalModel):
         cos = self.cos[:, :L]
         sin = self.sin[:, :L]
 
-        x, x_compressed, boundaries, counts, avg_chunk_size, probs, log_probs = \
+        x, x_compressed, boundaries, counts, avg_chunk_size, probs, log_probs, logits = \
             self.compressor(x, cos, sin, input_ids=input_ids)
 
         stats = {f"level_{self.depth}/avg_chunk_size": avg_chunk_size}
@@ -135,7 +135,7 @@ class ReinforceHierarchicalModel(HierarchicalModel):
 
         out = self.decoder(x_processed, boundaries, counts, x, cos, sin, L)
 
-        return out, stats, x, probs, log_probs
+        return out, stats, x, probs, log_probs, logits
 
 
 class ReinforceHierarchicalLM(HierarchicalLM):
@@ -172,7 +172,7 @@ class ReinforceHierarchicalLM(HierarchicalLM):
 
     def forward(self, input_ids, labels=None):
         x = self.emb(input_ids)  # [B, L, D]
-        out, stats, compressor_hidden, probs, log_probs = self.model(x, input_ids=input_ids)
+        out, stats, compressor_hidden, probs, log_probs, router_logits = self.model(x, input_ids=input_ids)
 
         if labels is not None:
             B, L = labels.shape
@@ -217,9 +217,10 @@ class ReinforceHierarchicalLM(HierarchicalLM):
             # Eq 15: L^pi = -sum log pi(a_i) * detach(A_i)
             reinforce_loss = -(log_probs * A).mean()
 
-            # --- target downsample-rate regulariser ---
-            mean_prob = probs.mean()
-            target_rate_loss = (mean_prob - self.config.target_downsample_rate) ** 2
+            # Eq 20: L^target = l_bar * detach(p_bar - pi_target)
+            mean_logit = router_logits.mean()  # l_bar
+            mean_prob = probs.mean()            # p_bar
+            target_rate_loss = mean_logit * (mean_prob - self.config.target_downsample_rate).detach()
 
             total_loss = (
                 ce_loss # log p_theta maximize

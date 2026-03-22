@@ -4,7 +4,7 @@
 #SBATCH --output=slurm_logs/%j_%x.out
 #SBATCH --error=slurm_logs/%j_%x.err
 #SBATCH --export=ALL
-#SBATCH --time=2:00:00
+#SBATCH --time=4:00:00
 #SBATCH --gres=gpu:1
 #SBATCH --mem=32G
 #SBATCH --cpus-per-task=8
@@ -75,7 +75,7 @@ accelerate launch --config-file accelerate.yaml --mixed_precision=bf16 --num_pro
 --config-path config \
 --config-name byte.yaml \
 wandb.project="fineweb-byte" \
-wandb.exp_name="reinforce vanilla aux gamma_0.99 lr_4e-4" \
+wandb.exp_name="reinforce vanilla gamma_0.99 z_loss_0.01 lr_4e-4" \
 \
 train.batch_size=32 \
 \
@@ -92,9 +92,11 @@ reinforce_hourglass.block_size=1024 \
 \
 reinforce_hourglass.reinforce_gamma=0.99 \
 reinforce_hourglass.reinforce_weight=1.0 \
-reinforce_hourglass.aux_weight=0.1 \
-reinforce_hourglass.target_rate_weight=0 \
-reinforce_hourglass.use_auxiliary_vocab=true \
+\
+reinforce_hourglass.aux_weight=0 \
+reinforce_hourglass.use_auxiliary_vocab=false \
+\
+reinforce_hourglass.target_rate_weight=0.01 \
 reinforce_hourglass.use_router_scaling=false \
 \
 reinforce_hourglass.dim=768 \
