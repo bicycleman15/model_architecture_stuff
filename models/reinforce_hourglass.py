@@ -194,6 +194,7 @@ class ReinforceHierarchicalLM(HierarchicalLM):
                     reduction="none",
                 ).view(B, L)
                 aux_ce = aux_per_pos.mean()
+                # reward is maximize diff b/w last loss and aux loss
                 advantage = (per_pos_loss - aux_per_pos).detach()
             else:
                 aux_ce = torch.tensor(0.0, device=per_pos_loss.device)
