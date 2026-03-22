@@ -165,6 +165,7 @@ reinforce_hourglass:
     # REINFORCE hyperparameters
     reinforce_gamma: 0.99
     target_downsample_rate: 0.2
+    use_auxiliary_vocab: True
     router_logit_scale: 16.0   # D in Eq 18
     router_softcap: 50.0       # training-only softcap (Eq 19)
 

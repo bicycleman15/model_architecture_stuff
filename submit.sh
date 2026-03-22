@@ -75,7 +75,7 @@ accelerate launch --config-file accelerate.yaml --mixed_precision=bf16 --num_pro
 --config-path config \
 --config-name byte.yaml \
 wandb.project="fineweb-byte" \
-wandb.exp_name="reinforce gamma_0.99 lr_4e-4" \
+wandb.exp_name="reinforce sub-baseline no-aux gamma_0.99 lr_4e-4" \
 \
 train.batch_size=32 \
 \
@@ -90,6 +90,7 @@ optimizer.min_lr=4e-5 \
 model_type=reinforce_hourglass \
 reinforce_hourglass.block_size=1024 \
 reinforce_hourglass.reinforce_gamma=0.99 \
+reinforce_hourglass.use_auxiliary_vocab=false \
 \
 reinforce_hourglass.dim=768 \
 reinforce_hourglass.n_head=12 \

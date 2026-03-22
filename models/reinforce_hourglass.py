@@ -31,6 +31,7 @@ class ReinforceConfig(Config):
     # new hps
     reinforce_gamma: float = 0.99
     target_downsample_rate: float = 0.2
+    use_auxiliary_vocab: bool = True
 
     # handle router logits/probs
     router_logit_scale: float = 16.0
@@ -134,19 +135,21 @@ class ReinforceHierarchicalLM(HierarchicalLM):
 
     def __init__(self, config):
         super().__init__(config)
-        # Replace model with the REINFORCE variant
         self.model = ReinforceHierarchicalModel(config)
-        self.baseline_vocab = nn.Linear(config.dim, config.padded_vocab_size, bias=False)
+        if config.use_auxiliary_vocab:
+            self.baseline_vocab = nn.Linear(config.dim, config.padded_vocab_size, bias=False)
 
     def _init_weights(self, initializer_range: float = 0.02):
         super()._init_weights(initializer_range)
-        print(f"[Init] ReinforceHierarchicalLM: baseline_vocab std={initializer_range}")
-        nn.init.normal_(self.baseline_vocab.weight, mean=0.0, std=initializer_range)
+        if self.config.use_auxiliary_vocab:
+            print(f"[Init] ReinforceHierarchicalLM: baseline_vocab std={initializer_range}")
+            nn.init.normal_(self.baseline_vocab.weight, mean=0.0, std=initializer_range)
 
     def apply_lr_multiplier(self, lr_multiplier: List[float]):
         super().apply_lr_multiplier(lr_multiplier)
-        for param in self.baseline_vocab.parameters():
-            apply_optimization_params(param, lr_multiplier=lr_multiplier[0])
+        if self.config.use_auxiliary_vocab:
+            for param in self.baseline_vocab.parameters():
+                apply_optimization_params(param, lr_multiplier=lr_multiplier[0])
 
     def _compute_discounted_returns(self, advantage, gamma):
         """Reverse cumulative sum with exponential discount.
@@ -181,25 +184,30 @@ class ReinforceHierarchicalLM(HierarchicalLM):
             if log_probs is None:
                 return ce_loss, stats
 
-            # --- baseline CE loss (compressor hidden -> baseline vocab head) ---
-            baseline_logits = self.baseline_vocab(compressor_hidden)
-            baseline_per_pos = F.cross_entropy(
-                baseline_logits.view(-1, baseline_logits.size(-1)),
-                labels.view(-1),
-                ignore_index=-100,
-                reduction="none",
-            ).view(B, L)
-            baseline_ce = baseline_per_pos.mean()
-
             # --- REINFORCE loss ---
-            # advantage: positive means the processor didn't help enough
-            # (actual > baseline), so penalise the boundary decisions that led here.
-            advantage = (per_pos_loss - baseline_per_pos).detach()
+            if self.config.use_auxiliary_vocab:
+                baseline_logits = self.baseline_vocab(compressor_hidden)
+                baseline_per_pos = F.cross_entropy(
+                    baseline_logits.view(-1, baseline_logits.size(-1)),
+                    labels.view(-1),
+                    ignore_index=-100,
+                    reduction="none",
+                ).view(B, L)
+                baseline_ce = baseline_per_pos.mean()
+                advantage = (per_pos_loss - baseline_per_pos).detach()
+            else:
+                baseline_ce = torch.tensor(0.0, device=per_pos_loss.device)
+                advantage = per_pos_loss.detach()
 
             gamma = self.config.reinforce_gamma
-            R = self._compute_discounted_returns(advantage, gamma)
+            # Discounted returns G_{i,b} from per-position advantages
+            G = self._compute_discounted_returns(advantage, gamma)  # [B, L]
 
-            reinforce_loss = (R * log_probs).mean()
+            # Eq 14: batch-relative centering A_{i,b} = G_{i,b} - mean_b(G_{i,b})
+            A = G - G.mean(dim=0, keepdim=True)
+
+            # Eq 15: L^pi = -sum log pi(a_i) * detach(A_i)
+            reinforce_loss = -(log_probs * A).mean()
 
             # --- target downsample-rate regulariser ---
             mean_prob = probs.mean()
