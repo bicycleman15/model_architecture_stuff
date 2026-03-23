@@ -245,9 +245,16 @@ class HNetLM(HierarchicalLM):
             # may modify `out` in-place and corrupt the shared computation graph.
             target_rate_loss = None
             if boundary_probs is not None and self.config.target_rate_weight > 0:
-                mean_neg_log = (-torch.log((1 - boundary_probs).clamp(min=1e-4))).mean()
-                mean_prob = boundary_probs.mean()
-                target_rate_loss = mean_neg_log * (mean_prob - self.config.target_downsample_rate).detach()
+                # H-Net load-balancing loss (hnet/utils/train.py).
+                # N = downsampling factor (e.g. target_rate=0.2 → N=5).
+                N = 1.0 / self.config.target_downsample_rate
+                boundary_mask = (boundary_probs > 0.5)
+                true_ratio = boundary_mask.float().mean()       # hard — no gradient
+                average_prob = boundary_probs.mean()             # soft — has gradient
+                target_rate_loss = (
+                    (1 - true_ratio) * (1 - average_prob)
+                    + true_ratio * average_prob * (N - 1)
+                ) * N / (N - 1)
 
             # if self.config.use_fused_ops:
             #     ce_loss = self.fused_linear_cross_entropy(
