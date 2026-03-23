@@ -2,7 +2,7 @@
 Tokenize dataset.
 
 Usage:
-    python prepare_data.py
+    python scripts/prepare_data.py
 
 """
 
@@ -19,7 +19,7 @@ tokenizer_name = "gpt2"
 
 tokenizer = AutoTokenizer.from_pretrained(tokenizer_name)
 
-save_path = "data/fineweb-1b-gpt2"
+save_path = "data/fineweb-1b-nospace-gpt2"
 
 
 def preprocess_and_tokenize_batched(examples):
@@ -30,6 +30,10 @@ def preprocess_and_tokenize_batched(examples):
     - Pattern: [BOS] doc1 [BOS] doc2 [BOS] doc3 ...
     """
     texts = examples["text"]
+
+    # lets remove spaces from this text
+    texts = [t.replace(" ", "") for t in texts]
+
     input_ids = tokenizer(texts, return_attention_mask=False)["input_ids"]
     bos = tokenizer.bos_token_id or tokenizer.eos_token_id
     input_ids = [[bos] + ids for ids in input_ids]

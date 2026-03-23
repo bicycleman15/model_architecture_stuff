@@ -33,7 +33,6 @@ def preprocess_and_tokenize_batched(examples):
 
     # lets remove spaces from this text
     texts = [t.replace(" ", "") for t in texts]
-    breakpoint()
 
     results = tokenizer.encode(texts, add_bos=True)
     input_ids = [r["input_ids"].tolist() for r in results]
