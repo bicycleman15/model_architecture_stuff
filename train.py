@@ -208,7 +208,7 @@ def main(cfg: DictConfig):
             if accelerator.is_main_process:
                 num_tokens = targets.numel()
                 num_bytes = bytes_per_token[targets].sum().item()
-                ce_for_bpb = stats.get("reinforce/ce_loss", loss.item())
+                ce_for_bpb = stats.get("reinforce/ce_loss", stats.get("hnet/ce_loss", loss.item()))
                 train_bpb = ce_for_bpb * num_tokens / num_bytes / math.log(2) if num_bytes > 0 else 0.0
 
                 log_dict = {
@@ -222,7 +222,7 @@ def main(cfg: DictConfig):
                 wandb.log(log_dict)
 
             _num_bytes = bytes_per_token[targets].sum().item()
-            _ce = stats.get("reinforce/ce_loss", loss.item())
+            _ce = stats.get("reinforce/ce_loss", stats.get("hnet/ce_loss", loss.item()))
             _bpb = _ce * targets.numel() / _num_bytes / math.log(2) if _num_bytes > 0 else 0.0
             stats_str = " ".join(f"{k}={v:.2f}" for k, v in sorted(stats.items()))
             bar.set_postfix_str(f"loss={loss.item():.4f} bpb={_bpb:.4f} lr={lr:.6f} {stats_str}")
@@ -235,7 +235,7 @@ def main(cfg: DictConfig):
                 wandb.log({"val/loss": val_loss, "val/perplexity": val_ppl, "val/bpb": val_bpb})
 
             if accelerator.is_main_process:
-                if cfg.model.name in ("hourglass", "reinforce_hourglass"):
+                if cfg.model.name in ("hourglass", "reinforce_hourglass", "hnet"):
                     visualize_boundaries(accelerator.unwrap_model(model), test_loader, tokenizer, n=3)
 
         # save

@@ -116,5 +116,47 @@ def get_model(cfg):
             model.apply_lr_multiplier(list(lr_multiplier))
         return config, model
 
+    elif name == "hnet":
+        from models.hnet import HNetConfig, HNetLM
+
+        proc_dim = cfg.model.get("processor_dim", None)
+        proc_config_raw = cfg.model.get("processor_config", None)
+        initializer_range = cfg.model.get("initializer_range", 0.02)
+        lr_multiplier = cfg.model.get("lr_multiplier", None)
+
+        config = HNetConfig(
+            vocab_size=vocab_size,
+            block_size=cfg.model.block_size,
+            dim=cfg.model.dim,
+            n_head=cfg.model.n_head,
+
+            n_compressor_layers=cfg.model.n_compressor_layers,
+            n_processor_layers=cfg.model.n_processor_layers,
+            n_decoder_layers=cfg.model.n_decoder_layers,
+
+            chunk_method=cfg.model.chunk_method,
+            chunk_size=cfg.model.get("chunk_size", 4),
+
+            processor_dim=proc_dim,
+            processor_config=proc_config_raw,
+
+            initializer_range=initializer_range,
+            lr_multiplier=list(lr_multiplier) if lr_multiplier is not None else None,
+
+            norm_eps=norm_eps,
+
+            use_fused_ops=use_fused_ops,
+            use_qk_norm=use_qk_norm,
+
+            target_downsample_rate=cfg.model.target_downsample_rate,
+            target_rate_weight=cfg.model.target_rate_weight,
+        )
+
+        model = HNetLM(config)
+        model._init_weights(initializer_range)
+        if lr_multiplier is not None:
+            model.apply_lr_multiplier(list(lr_multiplier))
+        return config, model
+
     else:
         raise ValueError(f"Unknown model type: {name}")
