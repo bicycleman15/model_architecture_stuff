@@ -14,10 +14,10 @@ from transformers import AutoTokenizer  # pip install transformers
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 # ------------------------------------------
-local_dir = "/gpfs/data/ranganathlab/Jatin/model_architecture_stuff/data"
+local_dir = "/gpfs/data/ranganathlab/Jatin/model_architecture_stuff/data/fineweb-1b-byte-4b"
 dataset_name = "HuggingFaceFW/fineweb-edu"
 remote_name = "sample-10BT"
-shard_size = 100_000_000  # 100M tokens per shard
+shard_size = 500_000_000  # 500M tokens per shard
 TOKENIZER_NAME = "byte"  # "gpt2", "byte", or any HF tokenizer name
 
 # local_dir = "/gpfs/data/ranganathlab/Jatin/Datasets/wikitext-sharded-fixed"
@@ -70,9 +70,9 @@ os.makedirs(DATA_CACHE_DIR, exist_ok=True)
 
 # download the dataset
 fw = load_dataset(dataset_name, name=remote_name, split="train")
-fw = fw.train_test_split(test_size=0.01, shuffle=False, seed=42)
+fw = fw.train_test_split(test_size=0.005, shuffle=False, seed=42)
 
-fw_test = fw["test"]
+fw_test = fw["test"] # 50M test
 fw = fw["train"]
 fw = fw.shard(num_shards=10, index=0)  # first ~1B gpt2 tokens
 

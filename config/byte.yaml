@@ -14,7 +14,7 @@ seed: 42
 dataset:
     name: fineweb
 
-    path: /gpfs/data/ranganathlab/Jatin/model_architecture_stuff/data/fineweb-1b-byte
+    path: /gpfs/data/ranganathlab/Jatin/model_architecture_stuff/data/fineweb-1b-byte-4b
     tokenizer_name: "byte"
     vocab_size: 256
 

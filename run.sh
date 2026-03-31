@@ -8,11 +8,11 @@ wandb.project="fineweb-byte" \
 wandb.exp_name="test" \
 \
 train.batch_size=32 \
+train.global_batch_size=256 \
 \
-train.train_epochs=1 \
-eval.eval_interval=2500 \
-eval.eval_iters=100 \
-train.grad_accum=8 \
+train.train_steps=16000 \
+eval.eval_interval=100 \
+eval.eval_iters=3000 \
 \
 optimizer.lr=8e-4 \
 optimizer.min_lr=8e-5 \
