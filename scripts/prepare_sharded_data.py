@@ -1,11 +1,6 @@
-"""
-FineWeb-Edu dataset (for srs pretraining)
-https://huggingface.co/datasets/HuggingFaceFW/fineweb-edu
-Downloads and tokenizes the data and saves data shards to disk.
-Run simply as:
-$ python prepare_sharded_fineweb.py
-Will save shards to the local directory "edu_fineweb10B".
-"""
+# Copyright (c) 2026, Jatin Prakash.
+# tokenize dataset and create shards for serious pretraining
+# inspired somewhat from karpathy nanogpt repo
 
 import os
 import multiprocessing as mp
@@ -15,10 +10,10 @@ from tqdm import tqdm  # pip install tqdm
 from transformers import AutoTokenizer  # pip install transformers
 
 # ------------------------------------------
-local_dir = "/gpfs/data/ranganathlab/Jatin/Datasets/new-fineweb-5b-gpt2"
+local_dir = "data/test-gpt2"
 dataset_name = "HuggingFaceFW/fineweb-edu"
 remote_name = "sample-10BT"
-shard_size = 100_000_000  # 500M tokens per shard
+shard_size = 100_000_000  # 100M tokens per shard
 use_eos_token = True # append EOS token before each document
 TOKENIZER_NAME = "gpt2"
 # TOKENIZER_NAME = "meta-llama/Llama-2-7b-hf"
@@ -73,47 +68,31 @@ os.makedirs(DATA_CACHE_DIR, exist_ok=True)
 fw = load_dataset(dataset_name, name=remote_name, split="train")
 fw = fw.train_test_split(test_size=0.01, shuffle=False, seed=42)
 
-fw = fw["train"]  # use train split for now
-fw = fw.shard(num_shards=2, index=0)  # first ~5B tokens
+fw_test = fw["test"]
+fw = fw["train"]
+fw = fw.shard(num_shards=2, index=0)  # first ~500M tokens
 
 print(fw)
+print(fw_test)
 
 # --- HF tokenizer (lazy-init per process so mp.Pool works cleanly) ---
 _TOKENIZER = None
 _EOT_ID = None
 
 def _get_tokenizer():
-    """Create (once per process) and return the fast HF tokenizer + eos id."""
+    """Create (once per process) and return the fast HF tokenizer + bos id."""
     global _TOKENIZER, _EOT_ID
     if _TOKENIZER is None:
         _TOKENIZER = AutoTokenizer.from_pretrained(TOKENIZER_NAME, use_fast=True)
-        # Prefer eos_token_id; if missing, try common alternatives or add one.
-        eos_id = _TOKENIZER.eos_token_id
-        if eos_id is None:
-            # Try common special token names if eos not set
-            for tok in ("</s>", "<|endoftext|>", "<eos>"):
-                tok_id = _TOKENIZER.convert_tokens_to_ids(tok)
-                if tok_id != _TOKENIZER.unk_token_id and tok_id is not None and tok_id != -1:
-                    eos_id = tok_id
-                    break
-        if eos_id is None:
-            # As a last resort, add an EOS token
-            _TOKENIZER.add_special_tokens({"eos_token": "<|eos|>"})
-            eos_id = _TOKENIZER.eos_token_id
-        _EOT_ID = int(eos_id)
+        bos_id = _TOKENIZER.bos_token_id or _TOKENIZER.eos_token_id
+        _EOT_ID = int(bos_id)
     return _TOKENIZER, _EOT_ID
 
 def tokenize(doc):
-    # tokenizes a single document and returns a numpy array of tokens
-    tok, eot = _get_tokenizer()
+    # tokenizes a single document: [BOS] doc_tokens
+    tok, bos = _get_tokenizer()
     ids = tok.encode(doc["text"], add_special_tokens=False)
-    # ids = tok.encode(wt_detokenizer(doc["text"]), add_special_tokens=False)
-
-    if use_eos_token:
-        tokens = [eot]
-    else:
-        tokens = []
-    tokens.extend(ids)
+    tokens = [bos] + ids
     tokens_np = np.asarray(tokens, dtype=DTYPE)
 
     # Safety check if sticking with uint16
@@ -126,6 +105,10 @@ def tokenize(doc):
 
 def write_datafile(filename, tokens_np):
     np.save(filename, tokens_np)
+
+
+# --- tokenize train split into many .npy shards ---
+print(f"\nTokenizing train split ({len(fw)} documents) ...")
 
 # tokenize all documents and write output shards, each of shard_size tokens (last shard has remainder)
 nprocs = max(1, os.cpu_count() - 10) # leave some CPUs free
@@ -150,9 +133,9 @@ with mp.Pool(nprocs) as pool:
         else:
             # write the current shard and start a new one
 
-            split = "val" if shard_index == 0 else "train"
-            # always train for now
-            # split = "train"
+            # split = "val" if shard_index == 0 else "train"
+            # # always train for now
+            split = "train"
 
             filename = os.path.join(DATA_CACHE_DIR, f"shard_{split}_{shard_index:06d}")
             # split the document into whatever fits in this shard; the remainder goes to next one
@@ -171,9 +154,20 @@ with mp.Pool(nprocs) as pool:
     # write any remaining tokens as the last shard
     if token_count != 0:
 
-        split = "val" if shard_index == 0 else "train"
-        # always train for now
-        # split = "train"
+        # split = "val" if shard_index == 0 else "train"
+        # # always train for now
+        split = "train"
 
         filename = os.path.join(DATA_CACHE_DIR, f"shard_{split}_{shard_index:06d}")
         write_datafile(filename, all_tokens_np[:token_count])
+
+# --- tokenize test split into a single test.npy ---
+print(f"\nTokenizing test split ({len(fw_test)} documents) ...")
+with mp.Pool(nprocs) as pool:
+    test_tokens = np.concatenate(
+        list(tqdm(pool.imap(tokenize, fw_test, chunksize=16),
+                  total=len(fw_test), desc="Test tokenization"))
+    )
+test_filename = os.path.join(DATA_CACHE_DIR, "test")
+write_datafile(test_filename, test_tokens)
+print(f"Saved {len(test_tokens):,} test tokens to {test_filename}.npy")
