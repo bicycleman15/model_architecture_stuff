@@ -35,28 +35,23 @@ train:
     # Number of workers for loading data
     num_workers: 4
 
-    # Batch size
+    # Global batch size (total across all GPUs and grad accum steps)
+    global_batch_size: 512
+
+    # Per-GPU batch size (grad_accum is computed automatically)
     batch_size: 128
 
-    # Micro batch size
-    # micro_batch_size: 128
+    # Number of optimizer steps
+    train_steps: 20000
 
-    # Number of training iterations
-    train_iters: 20000
-
-    # Warmup steps percentage
+    # Warmup steps percentage (used if warmup_steps is 0)
     warmup_steps_percentage: 0.1
 
-    # Warm steps. If these are provided, warmup_steps_percentage is ignored.
+    # Warmup steps (if > 0, warmup_steps_percentage is ignored)
     warmup_steps: 1000
 
     # Gradient clipping
     grad_norm: 1.0
-
-    # calculate grad norm after some train iters
-    grad_norm_interval: 25
-
-    grad_accum: 1
 
     norm_eps: 0.00001
 
