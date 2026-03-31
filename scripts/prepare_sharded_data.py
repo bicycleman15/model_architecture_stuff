@@ -1,22 +1,24 @@
 # Copyright (c) 2026, Jatin Prakash.
 # tokenize dataset and create shards for serious pretraining
 # inspired somewhat from karpathy nanogpt repo
+# also supports custom byte level tokenizer
 
 import os
+import sys
 import multiprocessing as mp
 import numpy as np
 from datasets import load_dataset  # pip install datasets
 from tqdm import tqdm  # pip install tqdm
 from transformers import AutoTokenizer  # pip install transformers
 
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+
 # ------------------------------------------
-local_dir = "data/test-gpt2"
+local_dir = "/gpfs/data/ranganathlab/Jatin/model_architecture_stuff/data"
 dataset_name = "HuggingFaceFW/fineweb-edu"
 remote_name = "sample-10BT"
 shard_size = 100_000_000  # 100M tokens per shard
-use_eos_token = True # append EOS token before each document
-TOKENIZER_NAME = "gpt2"
-# TOKENIZER_NAME = "meta-llama/Llama-2-7b-hf"
+TOKENIZER_NAME = "byte"  # "gpt2", "byte", or any HF tokenizer name
 
 # local_dir = "/gpfs/data/ranganathlab/Jatin/Datasets/wikitext-sharded-fixed"
 # dataset_name = "wikitext"
@@ -57,8 +59,10 @@ TOKENIZER_NAME = "gpt2"
 #     string = string.replace(" 's", "'s")
 #     return string
 
-# Choose the HF tokenizer (default: GPT-2, 50k vocab -> fits uint16)
-DTYPE = np.uint16  # if you use a tokenizer with vocab > 65535, switch to np.uint32
+if TOKENIZER_NAME == "byte":
+    DTYPE = np.uint8
+else:
+    DTYPE = np.uint16  # if you use a tokenizer with vocab > 65535, switch to np.uint32
 
 # create the cache the local directory if it doesn't exist yet
 DATA_CACHE_DIR = os.path.join(os.path.dirname(__file__), local_dir)
@@ -70,37 +74,39 @@ fw = fw.train_test_split(test_size=0.01, shuffle=False, seed=42)
 
 fw_test = fw["test"]
 fw = fw["train"]
-fw = fw.shard(num_shards=2, index=0)  # first ~500M tokens
+fw = fw.shard(num_shards=10, index=0)  # first ~1B gpt2 tokens
 
 print(fw)
 print(fw_test)
 
-# --- HF tokenizer (lazy-init per process so mp.Pool works cleanly) ---
+# --- tokenizer (lazy-init per process so mp.Pool works cleanly) ---
 _TOKENIZER = None
-_EOT_ID = None
 
 def _get_tokenizer():
-    """Create (once per process) and return the fast HF tokenizer + bos id."""
-    global _TOKENIZER, _EOT_ID
+    global _TOKENIZER
     if _TOKENIZER is None:
-        _TOKENIZER = AutoTokenizer.from_pretrained(TOKENIZER_NAME, use_fast=True)
-        bos_id = _TOKENIZER.bos_token_id or _TOKENIZER.eos_token_id
-        _EOT_ID = int(bos_id)
-    return _TOKENIZER, _EOT_ID
+        if TOKENIZER_NAME == "byte":
+            from byte_tokenizer import ByteTokenizer
+            _TOKENIZER = ByteTokenizer()
+        else:
+            _TOKENIZER = AutoTokenizer.from_pretrained(TOKENIZER_NAME, use_fast=True)
+    return _TOKENIZER
 
 def tokenize(doc):
-    # tokenizes a single document: [BOS] doc_tokens
-    tok, bos = _get_tokenizer()
-    ids = tok.encode(doc["text"], add_special_tokens=False)
-    tokens = [bos] + ids
-    tokens_np = np.asarray(tokens, dtype=DTYPE)
-
-    # Safety check if sticking with uint16
-    if DTYPE == np.uint16:
-        assert (0 <= tokens_np).all() and (tokens_np < 2**16).all(), (
-            "Token IDs exceed uint16 range. Use a tokenizer with vocab <= 65535 "
-            "or set DTYPE=np.uint32."
-        )
+    """Tokenize a single document: [BOS] doc_tokens"""
+    tok = _get_tokenizer()
+    if TOKENIZER_NAME == "byte":
+        result = tok.encode([doc["text"]], add_bos=True)[0]
+        tokens_np = result["input_ids"].astype(DTYPE)
+    else:
+        ids = tok.encode(doc["text"], add_special_tokens=False)
+        bos = tok.bos_token_id or tok.eos_token_id
+        tokens_np = np.asarray([bos] + ids, dtype=DTYPE)
+        if DTYPE == np.uint16:
+            assert (tokens_np < 2**16).all(), (
+                "Token IDs exceed uint16 range. Use a tokenizer with vocab <= 65535 "
+                "or set DTYPE=np.uint32."
+            )
     return tokens_np
 
 def write_datafile(filename, tokens_np):
