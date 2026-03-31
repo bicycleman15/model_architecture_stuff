@@ -51,3 +51,62 @@ hourglass.n_head=12 \
 hourglass.n_compressor_layers=3 \
 hourglass.n_processor_layers=6 \
 hourglass.n_decoder_layers=3
+
+WANDB_MODE=offline \
+accelerate launch --config-file accelerate.yaml --mixed_precision=bf16 --num_processes=1 train.py \
+--config-path config \
+--config-name byte.yaml \
+wandb.project="fineweb-byte-2" \
+wandb.exp_name="hnet basic 6L lr 8e-4" \
+\
+train.batch_size=32 \
+train.global_batch_size=256 \
+\
+train.train_steps=8000 \
+eval.eval_interval=800 \
+eval.eval_iters=100 \
+\
+optimizer.lr=8e-4 \
+optimizer.min_lr=8e-5 \
+\
+model_type=hnet \
+hnet.block_size=1024 \
+hnet.chunk_method="router" \
+hnet.chunk_size=4 \
+\
+hnet.dim=768 \
+hnet.n_head=12 \
+hnet.n_compressor_layers=3 \
+hnet.n_processor_layers=6 \
+hnet.n_decoder_layers=3
+
+
+WANDB_MODE=offline \
+accelerate launch --config-file accelerate.yaml --mixed_precision=bf16 --num_processes=1 train.py \
+--config-path config \
+--config-name byte.yaml \
+wandb.project="fineweb-byte-2" \
+wandb.exp_name="rl 6L lr 8e-4" \
+\
+train.batch_size=32 \
+train.global_batch_size=256 \
+\
+train.train_steps=8000 \
+eval.eval_interval=800 \
+eval.eval_iters=100 \
+\
+optimizer.lr=8e-4 \
+optimizer.min_lr=8e-5 \
+\
+model_type=reinforce_hourglass \
+reinforce_hourglass.block_size=1024 \
+reinforce_hourglass.chunk_method="router" \
+reinforce_hourglass.chunk_size=4 \
+\
+reinforce_hourglass.dim=768 \
+reinforce_hourglass.n_head=12 \
+reinforce_hourglass.n_compressor_layers=3 \
+reinforce_hourglass.n_processor_layers=6 \
+reinforce_hourglass.n_decoder_layers=3 \
+\
+reinforce_hourglass.use_router_scaling=False
