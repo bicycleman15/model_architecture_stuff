@@ -14,32 +14,59 @@
 # use `sbatch submit.slurm`
 # note we do not have WANDB_MODE=offline here because we are submitting the job to the cluster
 
-# BPE baseline
-# WANDB_MODE=offline \
 accelerate launch --config-file accelerate.yaml --mixed_precision=bf16 --num_processes=1 train.py \
 --config-path config \
---config-name bpe.yaml \
-wandb.project="fineweb-nospace-byte" \
-wandb.exp_name="bpe 1152D 6L lr 8e-4" \
-dataset.path="/gpfs/data/ranganathlab/Jatin/model_architecture_stuff/data/fineweb-1b-nospace-gpt2" \
-dataset.tokenizer_name="gpt2" \
+--config-name byte.yaml \
+wandb.project="fineweb-byte-2" \
+wandb.exp_name="uniform-8 6L lr 8e-4" \
 \
 train.batch_size=32 \
+train.global_batch_size=256 \
 \
-train.train_epochs=1 \
-eval.eval_interval=300 \
+train.train_steps=8000 \
+eval.eval_interval=800 \
 eval.eval_iters=100 \
-train.grad_accum=8 \
 \
 optimizer.lr=8e-4 \
 optimizer.min_lr=8e-5 \
 \
-model_type=transformer \
-transformer.block_size=256 \
+model_type=hourglass \
+hourglass.block_size=1024 \
+hourglass.chunk_method="uniform" \
+hourglass.chunk_size=8 \
 \
-transformer.dim=1152 \
-transformer.n_head=18 \
-transformer.n_layer=6
+hourglass.dim=768 \
+hourglass.n_head=12 \
+hourglass.n_compressor_layers=3 \
+hourglass.n_processor_layers=6 \
+hourglass.n_decoder_layers=3
+
+# BPE baseline
+# WANDB_MODE=offline \
+# accelerate launch --config-file accelerate.yaml --mixed_precision=bf16 --num_processes=1 train.py \
+# --config-path config \
+# --config-name bpe.yaml \
+# wandb.project="fineweb-nospace-byte" \
+# wandb.exp_name="bpe 1152D 6L lr 8e-4" \
+# dataset.path="/gpfs/data/ranganathlab/Jatin/model_architecture_stuff/data/fineweb-1b-nospace-gpt2" \
+# dataset.tokenizer_name="gpt2" \
+# \
+# train.batch_size=32 \
+# \
+# train.train_epochs=1 \
+# eval.eval_interval=300 \
+# eval.eval_iters=100 \
+# train.grad_accum=8 \
+# \
+# optimizer.lr=8e-4 \
+# optimizer.min_lr=8e-5 \
+# \
+# model_type=transformer \
+# transformer.block_size=256 \
+# \
+# transformer.dim=1152 \
+# transformer.n_head=18 \
+# transformer.n_layer=6
 
 
 

@@ -4,15 +4,15 @@ WANDB_MODE=offline \
 accelerate launch --config-file accelerate.yaml --mixed_precision=bf16 --num_processes=1 train.py \
 --config-path config \
 --config-name byte.yaml \
-wandb.project="fineweb-byte" \
-wandb.exp_name="test" \
+wandb.project="fineweb-byte-2" \
+wandb.exp_name="llamabyte 6L lr 8e-4" \
 \
 train.batch_size=32 \
 train.global_batch_size=256 \
 \
-train.train_steps=16000 \
-eval.eval_interval=100 \
-eval.eval_iters=3000 \
+train.train_steps=8000 \
+eval.eval_interval=800 \
+eval.eval_iters=100 \
 \
 optimizer.lr=8e-4 \
 optimizer.min_lr=8e-5 \
@@ -28,23 +28,23 @@ WANDB_MODE=offline \
 accelerate launch --config-file accelerate.yaml --mixed_precision=bf16 --num_processes=1 train.py \
 --config-path config \
 --config-name byte.yaml \
-wandb.project="fineweb-byte" \
-wandb.exp_name="spacebyte res init lr 4e-4" \
+wandb.project="fineweb-byte-2" \
+wandb.exp_name="uniform-4 6L lr 8e-4" \
 \
 train.batch_size=32 \
+train.global_batch_size=256 \
 \
-train.train_epochs=1 \
-eval.eval_interval=2500 \
+train.train_steps=8000 \
+eval.eval_interval=800 \
 eval.eval_iters=100 \
-train.grad_accum=8 \
 \
 optimizer.lr=8e-4 \
 optimizer.min_lr=8e-5 \
 \
 model_type=hourglass \
 hourglass.block_size=1024 \
-hourglass.chunk_method="spacebyte" \
-hourglass.chunk_size=1 \
+hourglass.chunk_method="uniform" \
+hourglass.chunk_size=4 \
 \
 hourglass.dim=768 \
 hourglass.n_head=12 \
