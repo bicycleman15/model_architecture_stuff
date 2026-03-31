@@ -9,7 +9,6 @@ from hydra.core.hydra_config import HydraConfig
 from omegaconf import DictConfig, OmegaConf
 
 import torch
-import torch.nn.functional as F
 import wandb
 
 torch._dynamo.config.optimize_ddp = False
@@ -19,6 +18,7 @@ from accelerate import Accelerator
 from accelerate.utils import DistributedDataParallelKwargs
 
 from models.utils import get_model
+from data_loader import ShardedDataLoader, TestDataset
 from utils import (
     CycleIterator,
     validate,
@@ -31,21 +31,6 @@ from utils import (
     create_results_dir,
     build_bytes_per_token,
 )
-
-
-class TokenDataset(torch.utils.data.Dataset):
-    def __init__(self, data_path, block_size):
-        self.tokens = torch.load(data_path, weights_only=True)
-        self.block_size = block_size
-
-    def __len__(self):
-        return (len(self.tokens) - 1) // self.block_size
-
-    def __getitem__(self, idx):
-        start = idx * self.block_size
-        x = self.tokens[start : start + self.block_size]
-        y = self.tokens[start + 1 : start + self.block_size + 1]
-        return x.long(), y.long()
 
 
 @hydra.main(config_path="config", config_name="byte", version_base=None)
@@ -79,20 +64,22 @@ def main(cfg: DictConfig):
 
     # data
     block_size = cfg.model.block_size
-    train_dataset = TokenDataset(os.path.join(cfg.dataset.path, "train.pt"), block_size)
-    test_dataset = TokenDataset(os.path.join(cfg.dataset.path, "test.pt"), block_size)
 
-    g = torch.Generator()
-    g.manual_seed(cfg.seed)
-    train_loader = torch.utils.data.DataLoader(
-        train_dataset, batch_size=cfg.train.batch_size, shuffle=True, pin_memory=True, generator=g,
+    train_loader = ShardedDataLoader(
+        data_root=cfg.dataset.path,
+        block_size=block_size,
+        batch_size=cfg.train.batch_size,
+        split="train",
+        process_rank=accelerator.process_index,
+        num_processes=accelerator.num_processes,
+        seed=cfg.seed,
     )
+    train_iterator = CycleIterator(train_loader)
+
+    test_dataset = TestDataset(os.path.join(cfg.dataset.path, "test.npy"), block_size)
     test_loader = torch.utils.data.DataLoader(
         test_dataset, batch_size=cfg.train.batch_size, shuffle=False, pin_memory=True,
     )
-
-    train_loader = accelerator.prepare_data_loader(train_loader)
-    train_iterator = CycleIterator(train_loader)
 
     if cfg.dataset.tokenizer_name == "byte":
         from byte_tokenizer import ByteTokenizer
@@ -112,7 +99,8 @@ def main(cfg: DictConfig):
     accelerator.print(model_config)
 
     accelerator.print("*****************************************************************")
-    accelerator.print(f"Train tokens: {len(train_dataset.tokens):,} | Test tokens: {len(test_dataset.tokens):,}")
+    n_shards = len(train_loader.dataset.shards)
+    accelerator.print(f"Train shards: {n_shards} | Test sequences: {len(test_dataset):,}")
     accelerator.print(f"Parameters: {num_parameters(model):,}")
     accelerator.print(f"Using #GPUs: {accelerator.num_processes}")
     accelerator.print(f"Using Mixed Precision: {accelerator.mixed_precision}")
@@ -125,13 +113,9 @@ def main(cfg: DictConfig):
     accelerator.print(f"Gradient Accumulation steps: {cfg.train.grad_accum}")
     accelerator.print()
 
-    # determine total training iterations
-    if cfg.train.train_epochs > -1:
-        train_iters = cfg.train.train_epochs * len(train_loader)
-        accelerator.print(f"Using epoch-based training: {cfg.train.train_epochs} epochs x {len(train_loader)} iters/epoch = {train_iters:,} iters")
-    else:
-        train_iters = cfg.train.train_iters
-        accelerator.print(f"Using iter-based training: {train_iters:,} iters")
+    # determine total training iterations (sharded loader is always iter-based)
+    train_iters = cfg.train.train_iters
+    accelerator.print(f"Using iter-based training: {train_iters:,} iters")
     accelerator.print()
 
     accelerator.print(f"Train iters: {train_iters:,}")
@@ -146,10 +130,7 @@ def main(cfg: DictConfig):
     else:
         accelerator.print("Not using gradient clipping")
 
-    if cfg.train.train_epochs > -1:
-        warmup_steps = int(train_iters * 0.1)
-        accelerator.print(f"Warmup iters (10% of {train_iters}): {warmup_steps}")
-    elif cfg.train.warmup_steps > 0:
+    if cfg.train.warmup_steps > 0:
         warmup_steps = cfg.train.warmup_steps
         accelerator.print(f"Warmup iters: {warmup_steps}")
     else:

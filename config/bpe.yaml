@@ -41,9 +41,8 @@ train:
     # Micro batch size
     # micro_batch_size: 128
 
-    # Number of optimizer steps, please modify according to the dataset and batch size
+    # Number of training iterations
     train_iters: 20000
-    train_epochs: -1
 
     # Warmup steps percentage
     warmup_steps_percentage: 0.1
