@@ -1,4 +1,5 @@
 from models.transformer import TransformerConfig, Transformer
+from models.residual.mean_residual_transformer import MeanResidualTransformerConfig, MeanResidualTransformer
 from models.hourglass import Config as HourglassConfig, HierarchicalLM
 
 
@@ -28,6 +29,27 @@ def get_model(cfg):
             use_qk_norm=use_qk_norm,
         )
         model = Transformer(config)
+        return config, model
+
+    elif name == "mean_residual_transformer":
+        initializer_range = cfg.model.get("initializer_range", 0.02)
+        alpha = cfg.model.get("alpha", 1.0)
+        config = MeanResidualTransformerConfig(
+            vocab_size=vocab_size,
+            block_size=cfg.model.block_size,
+
+            n_layer=cfg.model.n_layer,
+            dim=cfg.model.dim,
+            n_head=cfg.model.n_head,
+
+            alpha=alpha,
+            initializer_range=initializer_range,
+            norm_eps=norm_eps,
+
+            use_fused_ops=use_fused_ops,
+            use_qk_norm=use_qk_norm,
+        )
+        model = MeanResidualTransformer(config)
         return config, model
 
     elif name == "hourglass":
