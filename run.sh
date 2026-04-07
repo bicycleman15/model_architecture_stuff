@@ -159,3 +159,52 @@ mean_residual_transformer.block_size=1024 \
 mean_residual_transformer.n_layer=36 \
 mean_residual_transformer.dim=256 \
 mean_residual_transformer.n_head=4
+
+
+# overfit stuff
+
+# vanilla
+
+WANDB_MODE=offline \
+accelerate launch --config-file accelerate.yaml --mixed_precision=bf16 --num_processes=1 overfit.py \
+--config-path config/residual \
+--config-name fineweb.yaml \
+wandb.project="overfit-residual" \
+wandb.exp_name="vanilla 12L 256D lr 12e-4" \
+\
+train.batch_size=128 \
+train.global_batch_size=512 \
+\
+train.train_steps=32000 \
+\
+optimizer.lr=12e-4 \
+optimizer.min_lr=12e-5 \
+\
+model_type=transformer \
+transformer.block_size=1024 \
+transformer.n_layer=12 \
+transformer.dim=256 \
+transformer.n_head=4
+
+# res
+
+WANDB_MODE=offline \
+accelerate launch --config-file accelerate.yaml --mixed_precision=bf16 --num_processes=1 overfit.py \
+--config-path config/residual \
+--config-name fineweb.yaml \
+wandb.project="overfit-residual" \
+wandb.exp_name="mean res 12L 256D lr 8e-4" \
+\
+train.batch_size=128 \
+train.global_batch_size=512 \
+\
+train.train_steps=32000 \
+\
+optimizer.lr=8e-4 \
+optimizer.min_lr=8e-5 \
+\
+model_type=mean_residual_transformer \
+mean_residual_transformer.block_size=1024 \
+mean_residual_transformer.n_layer=12 \
+mean_residual_transformer.dim=256 \
+mean_residual_transformer.n_head=4

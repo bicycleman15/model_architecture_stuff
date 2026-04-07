@@ -152,9 +152,12 @@ class Transformer(nn.Module):
         input_ids: torch.LongTensor, 
         labels: Optional[torch.LongTensor] = None, 
         input_pos: Optional[Tensor] = None, 
-        mask: Optional[BlockMask] = None
+        mask: Optional[BlockMask] = None,
+        **kwargs,
     ) -> Tensor:
         bsz, seqlen = input_ids.shape
+        stats = {}
+        log_norms = kwargs.get("log_norms", False)
 
         if (mask is not None) and (input_pos is not None):
             # doing generation
@@ -169,23 +172,31 @@ class Transformer(nn.Module):
             sin = self.sin[:, :seqlen]
 
         x = self.wte(input_ids)
+        if log_norms:
+            stats["norm/embed"] = x.float().norm(dim=-1).mean().item()
+
         for i, layer in enumerate(self.layers):
             x = layer(x, cos, sin, mask=mask, input_pos=input_pos)
+            if log_norms and i % 4 == 3:
+                stats[f"norm/layer_{i}"] = x.float().norm(dim=-1).mean().item()
+
         x = self.norm(x)
+        if log_norms:
+            stats["norm/final"] = x.float().norm(dim=-1).mean().item()
 
         if labels is not None:
             if self.config.use_fused_ops:
                 loss = self.fused_linear_cross_entropy(
                     self.output.weight, x.view(-1, x.size(-1)), labels.view(-1)
                 )
-                return loss, {}
+                return loss, stats
             else:
                 logits = self.output(x)
                 loss = F.cross_entropy(logits.view(-1, logits.size(-1)), labels.view(-1), ignore_index=-100)
-                return loss, {}
+                return loss, stats
         
         logits = self.output(x)
-        return logits, {}
+        return logits, stats
 
 
 class TransformerBlock(nn.Module):

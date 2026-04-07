@@ -89,8 +89,11 @@ class MeanResidualTransformer(Transformer):
         labels: Optional[torch.LongTensor] = None,
         input_pos: Optional[Tensor] = None,
         mask: Optional[BlockMask] = None,
+        **kwargs,
     ) -> Tensor:
         bsz, seqlen = input_ids.shape
+        stats = {}
+        log_norms = kwargs.get("log_norms", False)
 
         if (mask is not None) and (input_pos is not None):
             mask.mask_mod = self.get_mask_mod(mask.mask_mod, input_pos[0])
@@ -106,32 +109,40 @@ class MeanResidualTransformer(Transformer):
         # # lets put a norm here
         # x = self.emb_rms_norm(x)
 
+        if log_norms:
+            stats["norm/embed"] = x.float().norm(dim=-1).mean().item()
+
         mu = torch.zeros_like(x)
         t = 0
 
-        for layer in self.layers:
+        for i, layer in enumerate(self.layers):
             x, mu, t = layer(
                 x, cos, sin, mu, t, self.sqrt_d, self.alpha,
                 mask=mask, input_pos=input_pos,
             )
+            if log_norms and i % 4 == 3:
+                stats[f"norm/layer_{i}"] = x.float().norm(dim=-1).mean().item()
 
         x = self.norm(x)
+
+        if log_norms:
+            stats["norm/final"] = x.float().norm(dim=-1).mean().item()
 
         if labels is not None:
             if self.config.use_fused_ops:
                 loss = self.fused_linear_cross_entropy(
                     self.output.weight, x.view(-1, x.size(-1)), labels.view(-1)
                 )
-                return loss, {}
+                return loss, stats
             else:
                 logits = self.output(x)
                 loss = F.cross_entropy(
                     logits.view(-1, logits.size(-1)), labels.view(-1), ignore_index=-100
                 )
-                return loss, {}
+                return loss, stats
 
         logits = self.output(x)
-        return logits, {}
+        return logits, stats
 
 
 if __name__ == "__main__":
