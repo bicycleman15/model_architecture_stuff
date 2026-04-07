@@ -1,4 +1,5 @@
 # copied from: https://github.com/rajesh-lab/cat-transformer/blob/main/transformer.py
+# this has a different weight init though, uses the og gpt2 init for weights that contribute to residual stream
 """
 A vanilla transformer implementation. 
 Nothing fancy here :)
