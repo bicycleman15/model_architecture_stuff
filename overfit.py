@@ -45,7 +45,7 @@ def main(cfg: DictConfig):
     print(f"Optimizer steps: {overfit_steps}")
     print(f"Total iterations: {train_iters}")
 
-    if cfg.train.warmup_steps > 0:
+    if cfg.train.warmup_steps >= 0:
         warmup_steps = cfg.train.warmup_steps
         print(f"Warmup steps: {warmup_steps}")
     else:
@@ -81,6 +81,10 @@ def main(cfg: DictConfig):
         config=OmegaConf.to_container(cfg, resolve=True),
         tags=["overfit"],
     )
+    wandb.define_metric("train/step")
+    wandb.define_metric("train/*", step_metric="train/step")
+    wandb.define_metric("stat/*", step_metric="train/step")
+    wandb.define_metric("perf/*", step_metric="train/step")
 
     # --- optimizer ---
     optimizer = torch.optim.AdamW(
@@ -111,8 +115,10 @@ def main(cfg: DictConfig):
         (loss / grad_accum).backward()
 
         if (it + 1) % grad_accum == 0:
-            if cfg.train.grad_norm > 0:
-                torch.nn.utils.clip_grad_norm_(model.parameters(), cfg.train.grad_norm)
+            grad_norm = torch.nn.utils.clip_grad_norm_(
+                model.parameters(),
+                cfg.train.grad_norm if cfg.train.grad_norm > 0 else float("inf"),
+            )
 
             optimizer.step()
             opt_step += 1
@@ -126,6 +132,7 @@ def main(cfg: DictConfig):
                 log_dict = {
                     "train/loss": loss_val,
                     "train/lr": lr,
+                    "train/grad_norm": grad_norm.item(),
                     "train/step": opt_step,
                     "perf/step_ms": dt * 1000,
                 }

@@ -138,7 +138,7 @@ def main(cfg: DictConfig):
     else:
         accelerator.print("Not using gradient clipping")
 
-    if cfg.train.warmup_steps > 0:
+    if cfg.train.warmup_steps >= 0:
         warmup_steps = cfg.train.warmup_steps
         accelerator.print(f"Warmup steps: {warmup_steps}")
     else:

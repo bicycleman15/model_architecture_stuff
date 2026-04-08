@@ -21,17 +21,17 @@ conda activate t2
 
 ################################################
 
-
+WANDB_MODE=offline \
 accelerate launch --config-file accelerate.yaml --mixed_precision=bf16 --num_processes=1 overfit.py \
 --config-path config/residual \
 --config-name fineweb.yaml \
 wandb.project="overfit-residual" \
-wandb.exp_name="vanilla 12L 256D lr 0.6e-3" \
+wandb.exp_name="test" \
 \
 train.batch_size=512 \
 train.global_batch_size=512 \
 \
-train.train_steps=10000 \
+train.train_steps=5000 \
 train.warmup_steps=0 \
 \
 optimizer.lr=0.6e-3 \

@@ -44,10 +44,10 @@ train:
     # Number of optimizer steps
     train_steps: 20000
 
-    # Warmup steps percentage (used if warmup_steps is 0)
+    # Warmup steps percentage (used if warmup_steps is -1)
     warmup_steps_percentage: 0.1
 
-    # Warmup steps (if > 0, warmup_steps_percentage is ignored)
+    # Warmup steps (if >= 0, used directly; set to -1 to use warmup_steps_percentage)
     warmup_steps: -1
 
     # Gradient clipping
