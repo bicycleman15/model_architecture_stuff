@@ -193,18 +193,19 @@ accelerate launch --config-file accelerate.yaml --mixed_precision=bf16 --num_pro
 --config-path config/residual \
 --config-name fineweb.yaml \
 wandb.project="overfit-residual" \
-wandb.exp_name="mean res 12L 256D lr 8e-4" \
+wandb.exp_name="mean res 12L 256D lr 1e-3" \
 \
-train.batch_size=128 \
+train.batch_size=512 \
 train.global_batch_size=512 \
 \
-train.train_steps=32000 \
+train.train_steps=10000 \
+train.warmup_steps=0 \
 \
-optimizer.lr=8e-4 \
-optimizer.min_lr=8e-5 \
+optimizer.lr=1e-3 \
+optimizer.min_lr=1e-4 \
 \
 model_type=mean_residual_transformer \
-mean_residual_transformer.block_size=1024 \
+mean_residual_transformer.block_size=512 \
 mean_residual_transformer.n_layer=12 \
 mean_residual_transformer.dim=256 \
 mean_residual_transformer.n_head=4

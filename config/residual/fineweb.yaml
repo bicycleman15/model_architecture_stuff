@@ -30,7 +30,7 @@ wandb:
 train:
 
     # Number of optimizer steps between saving checkpoints
-    save_interval: 100000
+    save_interval: 1000000000
 
     # Number of workers for loading data
     num_workers: 4
@@ -48,7 +48,7 @@ train:
     warmup_steps_percentage: 0.1
 
     # Warmup steps (if > 0, warmup_steps_percentage is ignored)
-    warmup_steps: 1000
+    warmup_steps: -1
 
     # Gradient clipping
     grad_norm: 1.0
