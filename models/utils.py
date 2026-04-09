@@ -34,6 +34,7 @@ def get_model(cfg):
     elif name == "mean_residual_transformer":
         initializer_range = cfg.model.get("initializer_range", 0.02)
         alpha = cfg.model.get("alpha", 1.0)
+        mean_power = cfg.model.get("mean_power", 1.0)
         config = MeanResidualTransformerConfig(
             vocab_size=vocab_size,
             block_size=cfg.model.block_size,
@@ -43,6 +44,7 @@ def get_model(cfg):
             n_head=cfg.model.n_head,
 
             alpha=alpha,
+            mean_power=mean_power,
             initializer_range=initializer_range,
             norm_eps=norm_eps,
 

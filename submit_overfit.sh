@@ -21,12 +21,12 @@ conda activate t2
 ################################################
 
 # for MODEL in transformer mean_residual_transformer; do
-for MODEL in transformer; do
-  for LR in 5e-4 1e-3 5e-3 1e-2; do
-    for WARMUP in 0 400; do
+for MODEL in mean_residual_transformer; do
+  for LR in 5e-4 1e-3 5e-3; do
+    for WARMUP in 400; do
 
       MIN_LR=$(python3 -c "print(f'{float(\"$LR\") / 10:.1e}')")
-      NAME="${MODEL} 12L 256D lr${LR} wu${WARMUP}"
+      NAME="${MODEL} tp_rms 36L 256D lr${LR} wu${WARMUP}"
 
       echo "=========================================="
       echo "Running: $NAME"
@@ -50,7 +50,7 @@ for MODEL in transformer; do
       \
       model_type=$MODEL \
       ${MODEL}.block_size=512 \
-      ${MODEL}.n_layer=12 \
+      ${MODEL}.n_layer=36 \
       ${MODEL}.dim=256 \
       ${MODEL}.n_head=4
 

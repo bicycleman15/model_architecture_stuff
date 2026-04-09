@@ -20,10 +20,20 @@ from liger_kernel.transformers import LigerRMSNorm
 @dataclass
 class MeanResidualTransformerConfig(TransformerConfig):
     alpha: float = 1.0
+    mean_power: float = 1.0
 
 
 class MeanResidualTransformerBlock(TransformerBlock):
     """TransformerBlock with mean-recurrence connections instead of additive residuals."""
+
+    def __init__(self, config, layer_idx: int) -> None:
+        super().__init__(config, layer_idx)
+        if config.use_fused_ops:
+            self.attn_out_norm = LigerRMSNorm(config.dim, eps=config.norm_eps)
+            self.ffn_out_norm = LigerRMSNorm(config.dim, eps=config.norm_eps)
+        else:
+            self.attn_out_norm = RMSNorm(config.dim, eps=config.norm_eps)
+            self.ffn_out_norm = RMSNorm(config.dim, eps=config.norm_eps)
 
     def forward(
         self,
@@ -34,6 +44,7 @@ class MeanResidualTransformerBlock(TransformerBlock):
         t: int,
         sqrt_d: float,
         alpha: float,
+        p: float,
         is_causal: Optional[bool] = True,
         mask: Optional[BlockMask] = None,
         input_pos: Optional[Tensor] = None,
@@ -45,19 +56,20 @@ class MeanResidualTransformerBlock(TransformerBlock):
         )
 
         # we assume we get the correct mu_t upto this position
-        # x_{t+1} = sqrt(d) * tanh(f_t(x_t) / sqrt(d)) - alpha * mu_t
-        x_new = sqrt_d * torch.tanh(attn_out / sqrt_d) - alpha * mu
+        # x_{t+1} = RMSNorm(sqrt(d) * tanh(f_t(x_t) / sqrt(d))) - alpha * mu_t
+        x_new = self.attn_out_norm(sqrt_d * torch.tanh(attn_out / sqrt_d)) - alpha * mu
 
-        # mu_{t+1} = (t / (t+1)) * mu_t + (1 / (t+1)) * x_t
-        mu = (t / (t + 1)) * mu + (1 / (t + 1)) * x
+        # mu_{t+1} = (t^p / (t+1)^p) * mu_t + (1 / (t+1)^p) * x_t
+        mu = (t ** p / (t + 1) ** p) * mu + (1 / (t + 1) ** p) * x
 
         t += 1
         x = x_new
 
         # --- FFN sublayer ---
+        # do the same as above
         ffn_out = self.feed_forward(self.ffn_norm(x))
-        x_new = sqrt_d * torch.tanh(ffn_out / sqrt_d) - alpha * mu
-        mu = (t / (t + 1)) * mu + (1 / (t + 1)) * x
+        x_new = self.ffn_out_norm(sqrt_d * torch.tanh(ffn_out / sqrt_d)) - alpha * mu
+        mu = (t ** p / (t + 1) ** p) * mu + (1 / (t + 1) ** p) * x
         t += 1
         x = x_new
 
@@ -81,6 +93,7 @@ class MeanResidualTransformer(Transformer):
         #     self.emb_rms_norm = RMSNorm(config.dim, eps=config.norm_eps)
 
         self.alpha = config.alpha
+        self.mean_power = config.mean_power
         self.sqrt_d = math.sqrt(config.dim)
 
     def forward(
@@ -117,7 +130,7 @@ class MeanResidualTransformer(Transformer):
 
         for i, layer in enumerate(self.layers):
             x, mu, t = layer(
-                x, cos, sin, mu, t, self.sqrt_d, self.alpha,
+                x, cos, sin, mu, t, self.sqrt_d, self.alpha, self.mean_power,
                 mask=mask, input_pos=input_pos,
             )
             if log_norms and i % 4 == 3:

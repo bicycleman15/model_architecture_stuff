@@ -109,6 +109,7 @@ mean_residual_transformer:
     n_head: 12
 
     alpha: 1.0
+    mean_power: 1.0
 
     use_fused_ops: True
     use_qk_norm: True

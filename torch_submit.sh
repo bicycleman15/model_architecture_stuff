@@ -4,7 +4,7 @@
 #SBATCH --output=/scratch/jp7467/slurm_logs/%j_%x.out
 #SBATCH --error=/scratch/jp7467/slurm_logs/%j_%x.err
 #SBATCH --export=ALL
-#SBATCH --time=6:00:00
+#SBATCH --time=1:00:00
 #SBATCH --gres=gpu:h200:1
 #SBATCH --account=torch_pr_235_cds
 #SBATCH --mem=300G
@@ -21,27 +21,27 @@ conda activate t2
 
 ################################################
 
-WANDB_MODE=offline \
 accelerate launch --config-file accelerate.yaml --mixed_precision=bf16 --num_processes=1 overfit.py \
 --config-path config/residual \
 --config-name fineweb.yaml \
 wandb.project="overfit-residual" \
-wandb.exp_name="test" \
+wandb.exp_name="sanity check mean tp1_rms 36L 256D lr 8e-4" \
 \
 train.batch_size=512 \
 train.global_batch_size=512 \
 \
-train.train_steps=5000 \
-train.warmup_steps=0 \
+train.train_steps=4000 \
+train.warmup_steps=400 \
 \
-optimizer.lr=0.6e-3 \
-optimizer.min_lr=0.6e-4 \
+optimizer.lr=8e-4 \
+optimizer.min_lr=8e-5 \
 \
-model_type=transformer \
-transformer.block_size=512 \
-transformer.n_layer=12 \
-transformer.dim=256 \
-transformer.n_head=4
+model_type=mean_residual_transformer \
+mean_residual_transformer.block_size=512 \
+mean_residual_transformer.n_layer=36 \
+mean_residual_transformer.dim=256 \
+mean_residual_transformer.n_head=4 \
+mean_residual_transformer.mean_power=1
 
 
 ################################################
