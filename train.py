@@ -22,6 +22,7 @@ from data_loader import ShardedDataLoader, TestDataset
 from utils import (
     CycleIterator,
     validate,
+    validate_char_only,
     get_lr,
     group_params,
     num_parameters,
@@ -104,6 +105,11 @@ def main(cfg: DictConfig):
 
     # model
     model_config, model = get_model(cfg)
+
+    if cfg.dataset.name == "tinystories":
+        eval_fn = validate_char_only
+    else:
+        eval_fn = validate
 
     accelerator.print(model)
     accelerator.print(model_config)
@@ -219,7 +225,7 @@ def main(cfg: DictConfig):
 
         # eval (on optimizer steps)
         if opt_step > 0 and opt_step % cfg.eval.eval_interval == 0 and (it + 1) % grad_accum == 0:
-            val_loss, val_ppl, val_bpb = validate(model, test_loader, accelerator.device, eval_iters=cfg.eval.eval_iters, bytes_per_token=bytes_per_token)
+            val_loss, val_ppl, val_bpb = eval_fn(model, test_loader, accelerator.device, eval_iters=cfg.eval.eval_iters, bytes_per_token=bytes_per_token)
             accelerator.print(f"\nStep {opt_step}: val_loss={val_loss:.4f} ppl={val_ppl:.2f} bpb={val_bpb:.4f}")
             if accelerator.is_main_process:
                 wandb.log({"val/loss": val_loss, "val/perplexity": val_ppl, "val/bpb": val_bpb})
@@ -249,7 +255,7 @@ def main(cfg: DictConfig):
         )
         accelerator.print(f"Training complete. Saved model at: {model_save_path}")
 
-    val_loss, val_ppl, val_bpb = validate(model, test_loader, accelerator.device, eval_iters=cfg.eval.eval_iters, bytes_per_token=bytes_per_token)
+    val_loss, val_ppl, val_bpb = eval_fn(model, test_loader, accelerator.device, eval_iters=cfg.eval.eval_iters, bytes_per_token=bytes_per_token)
     accelerator.print(f"Final: val_loss={val_loss:.4f} ppl={val_ppl:.2f} bpb={val_bpb:.4f}")
 
     accelerator.wait_for_everyone()

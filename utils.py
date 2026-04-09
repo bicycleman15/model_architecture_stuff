@@ -118,6 +118,41 @@ def validate(model, val_dataloader, device, eval_iters=None, bytes_per_token=Non
     return val_loss, perplexity, val_bpb
 
 
+@torch.no_grad()
+def validate_char_only(model, val_dataloader, device, eval_iters=None, bytes_per_token=None, pad_zero_idx=10):
+    """Like validate(), but masks out zero-padding tokens (target == pad_zero_idx) from loss."""
+    model.eval()
+    total_loss = 0.0
+    total_tokens = 0
+    total_bytes = 0
+
+    for i, (input_ids, targets) in enumerate(tqdm(val_dataloader, desc="Evaluating (char-only)", total=eval_iters)):
+        if eval_iters is not None and i >= eval_iters:
+            break
+        input_ids, targets = input_ids.to(device), targets.to(device)
+        targets = targets.clone()
+        targets[targets == pad_zero_idx] = -100
+        num_tokens = (targets != -100).sum().item()
+        loss, stats = model(input_ids, labels=targets)
+        ce_loss = stats.get("reinforce/ce_loss", loss.item())
+        total_loss += ce_loss * num_tokens
+        total_tokens += num_tokens
+
+        if bytes_per_token is not None:
+            valid_targets = targets[targets != -100]
+            total_bytes += bytes_per_token[valid_targets].sum().item()
+
+    val_loss = total_loss / total_tokens
+    perplexity = math.exp(val_loss)
+
+    val_bpb = None
+    if bytes_per_token is not None and total_bytes > 0:
+        val_bpb = total_loss / total_bytes / math.log(2)
+
+    model.train()
+    return val_loss, perplexity, val_bpb
+
+
 def group_params(model, weight_decay):
     """Create optimizer param groups respecting per-param _optim annotations.
 
