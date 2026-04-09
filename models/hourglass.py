@@ -41,6 +41,7 @@ class Config:
     chunk_method: str = "router"  # "uniform", "router", or "spacebyte"
     chunk_size: int = 4           # fixed chunk size for uniform chunking
     bos_idx: int = 254  # BOS token index (always treated as a boundary for spacebyte)
+    pad_zero_idx: int = 10  # token ID of the '0' padding character
 
     # processor
     processor_dim: Optional[int] = None  # dim the processor operates at (default: 3/2 * dim)
@@ -158,18 +159,21 @@ class Compressor(nn.Module):
         elif self.config.chunk_method == "spacebyte":
             assert input_ids is not None, "spacebyte chunking requires input_ids"
 
-            # UTF-8 byte boundary detection (https://github.com/kjslag/spacebyte):
-            # non-alphanumeric ASCII bytes or UTF-8 multi-byte start bytes (>= 0xC0)
-            is_boundary = (
-                (input_ids < ord('0')) |
-                ((ord('9') < input_ids) & (input_ids < ord('A'))) |
-                ((ord('Z') < input_ids) & (input_ids < ord('a'))) |
-                ((ord('z') < input_ids) & (input_ids < 0b1000_0000)) |
-                (0b1100_0000 <= input_ids)
-            )
+            # # UTF-8 byte boundary detection (https://github.com/kjslag/spacebyte):
+            # # non-alphanumeric ASCII bytes or UTF-8 multi-byte start bytes (>= 0xC0)
+            # is_boundary = (
+            #     (input_ids < ord('0')) |
+            #     ((ord('9') < input_ids) & (input_ids < ord('A'))) |
+            #     ((ord('Z') < input_ids) & (input_ids < ord('a'))) |
+            #     ((ord('z') < input_ids) & (input_ids < 0b1000_0000)) |
+            #     (0b1100_0000 <= input_ids)
+            # )
+            #
+            # is_boundary[:, 1:] &= is_boundary[:, :-1].bitwise_not()
+            # is_boundary |= (input_ids == self.config.bos_idx)
 
-            is_boundary[:, 1:] &= is_boundary[:, :-1].bitwise_not()
-            is_boundary |= (input_ids == self.config.bos_idx)
+            # boundary at every non-padding token: chunks become [char, 0, ..., 0]
+            is_boundary = (input_ids != self.config.pad_zero_idx)
 
             boundaries_mask = is_boundary.float()
             select, boundary_positions, counts = self._boundaries_mask_to_select(

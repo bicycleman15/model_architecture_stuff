@@ -15,25 +15,27 @@
 # note we do not have WANDB_MODE=offline here because we are submitting the job to the cluster
 
 
-accelerate launch --config-file accelerate.yaml --mixed_precision=bf16 --num_processes=1 overfit.py \
---config-path config/residual \
---config-name fineweb.yaml \
-wandb.project="overfit-residual" \
-wandb.exp_name="vanilla 12L 256D lr 12e-4" \
+accelerate launch --config-file accelerate.yaml --mixed_precision=bf16 --num_processes=1 train.py \
+--config-path config/dynamic_chunk \
+--config-name char.yaml \
+wandb.project="tinystories-padded-mod15" \
+wandb.exp_name="flat 6L lr 8e-4" \
 \
-train.batch_size=128 \
-train.global_batch_size=512 \
+train.batch_size=32 \
+train.global_batch_size=32 \
 \
-train.train_steps=32000 \
+train.train_steps=4000 \
+eval.eval_interval=400 \
+eval.eval_iters=50 \
 \
-optimizer.lr=12e-4 \
-optimizer.min_lr=12e-5 \
+optimizer.lr=8e-4 \
+optimizer.min_lr=8e-5 \
 \
 model_type=transformer \
-transformer.block_size=1024 \
-transformer.n_layer=12 \
-transformer.dim=256 \
-transformer.n_head=4
+transformer.block_size=8192 \
+transformer.n_layer=6 \
+transformer.dim=768 \
+transformer.n_head=12
 
 
 

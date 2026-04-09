@@ -1,0 +1,207 @@
+hydra:
+  run:
+    dir: Results/hydra_outputs/${now:%Y-%m-%d}/${now:%H-%M-%S}
+  job:
+    chdir: false
+
+# disable hydra logging
+defaults:
+    - _self_
+
+# set the seed for reproducibility
+seed: 42
+
+dataset:
+    name: tinystories
+
+    path: /gpfs/data/ranganathlab/Jatin/model_architecture_stuff/data/tinystories_char500m_zeropadded_mod15
+    tokenizer_name: bicycleman15/tinystories-gpt4-clean-tokenizer
+    vocab_size: 75
+
+results_dir: Results
+
+wandb:
+    project: tinystories-char-padded
+    exp_name: default
+
+################################################################################
+
+# Training-related arguments.
+train:
+
+    # Number of optimizer steps between saving checkpoints
+    save_interval: 100000
+
+    # Number of workers for loading data
+    num_workers: 4
+
+    # Global batch size (total across all GPUs and grad accum steps)
+    global_batch_size: 512
+
+    # Per-GPU batch size (grad_accum is computed automatically)
+    batch_size: 128
+
+    # Number of optimizer steps
+    train_steps: 20000
+
+    # Warmup steps percentage (used if warmup_steps is 0)
+    warmup_steps_percentage: 0.1
+
+    # Warmup steps (if > 0, warmup_steps_percentage is ignored)
+    warmup_steps: 1000
+
+    # Gradient clipping
+    grad_norm: 1.0
+
+    norm_eps: 0.00001
+
+# Evaluation-related arguments.
+eval:
+
+    # Number of optimizer steps between testing
+    eval_interval: 2000
+
+    # Iters for testing
+    eval_iters: 100
+
+# Optimizer-related arguments
+optimizer:
+
+    # Learning rate 
+    lr: 8e-4
+
+    # Minimum learning rate
+    min_lr: 8e-5
+
+    # Weight decay
+    weight_decay: 0.1
+
+    # Betas (beta1, beta2)
+    betas: [0.9, 0.95]
+
+# results directory
+# don't change this, it will be set by the script
+result_dir:
+
+# choose from [transformer, hourglass]
+model_type: transformer
+
+transformer:
+    name: transformer
+
+    dim: 768
+    block_size: 2048
+
+    n_layer: 12
+    n_head: 12
+
+    initializer_range: 0.02
+
+    use_fused_ops: True
+    use_qk_norm: True
+
+
+hourglass:
+    name: hourglass
+
+    block_size: 2048
+
+    use_fused_ops: True
+    use_qk_norm: True
+
+    dim: 768
+    n_head: 12
+
+    n_compressor_layers: 3
+    n_processor_layers: 6
+    n_decoder_layers: 3
+
+    # chunking
+    chunk_method: "router"  # "uniform", "router", or "spacebyte"
+    chunk_size: 4           # fixed chunk size for uniform chunking
+
+    # processor
+    processor_dim: null  # dim the processor operates at (default: 3/2 * dim)
+    processor_config: null  # None = flat transformer blocks, or a Config for recursive nesting
+
+    # weight init / lr
+    initializer_range: 0.02
+    lr_multiplier: [2.0, 1.5, 1.0]  # per-stage LR multipliers [outer, middle, inner]
+
+
+reinforce_hourglass:
+    name: reinforce_hourglass
+
+    block_size: 2048
+
+    use_fused_ops: True
+    use_qk_norm: True
+
+    dim: 768
+    n_head: 12
+
+    n_compressor_layers: 3
+    n_processor_layers: 6
+    n_decoder_layers: 3
+
+    # chunking (must be "router" for REINFORCE)
+    chunk_method: "router"
+    chunk_size: 4
+
+    # processor
+    processor_dim: null
+    processor_config: null
+
+    # weight init / lr
+    initializer_range: 0.02
+    lr_multiplier: [2.0, 1.5, 1.0]
+
+    # REINFORCE hyperparameters
+    reinforce_gamma: 0.99
+    reinforce_weight: 0.01
+
+    use_auxiliary_vocab: True
+    aux_weight: 0.1
+
+    target_downsample_rate: 0.2 # how much to compress
+    target_rate_weight: 0.01 # H-net has this as 0.03
+
+    use_router_scaling: True    # Eq 18-19: logit scaling + softcap
+    router_logit_scale: 16.0   # D in Eq 18
+    router_softcap: 50.0       # training-only softcap (Eq 19)
+
+
+hnet:
+    name: hnet
+
+    block_size: 2048
+
+    use_fused_ops: True
+    use_qk_norm: True
+
+    dim: 768
+    n_head: 12
+
+    n_compressor_layers: 3
+    n_processor_layers: 6
+    n_decoder_layers: 3
+
+    # chunking (cosine-similarity router)
+    chunk_method: "router"
+    chunk_size: 4
+
+    # processor
+    processor_dim: null
+    processor_config: null
+
+    # weight init / lr
+    initializer_range: 0.02
+    lr_multiplier: [2.0, 1.5, 1.0]
+
+    # H-Net target rate
+    target_downsample_rate: 0.2
+    target_rate_weight: 0.03 # according to the paper
+
+
+# Populate the model settings based on selection in model_type
+model: ${${model_type}}
