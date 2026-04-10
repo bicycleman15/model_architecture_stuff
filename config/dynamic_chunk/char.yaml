@@ -18,6 +18,11 @@ dataset:
     tokenizer_name: bicycleman15/tinystories-gpt4-clean-tokenizer
     vocab_size: 75
 
+    # token_id of the '0' padding character
+    zero_padding_idx: 10
+    # whether to mask zero-padding tokens from training loss
+    mask_zero_padding: false
+
 results_dir: Results
 
 wandb:
@@ -47,8 +52,8 @@ train:
     # Warmup steps percentage (used if warmup_steps is 0)
     warmup_steps_percentage: 0.1
 
-    # Warmup steps (if > 0, warmup_steps_percentage is ignored)
-    warmup_steps: 1000
+    # Warmup steps (if >= 0, warmup_steps_percentage is ignored)
+    warmup_steps: -1
 
     # Gradient clipping
     grad_norm: 1.0
