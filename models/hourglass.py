@@ -41,7 +41,7 @@ class Config:
     chunk_method: str = "router"  # "uniform", "router", or "spacebyte"
     chunk_size: int = 4           # fixed chunk size for uniform chunking
     bos_idx: int = 254  # BOS token index (always treated as a boundary for spacebyte)
-    pad_zero_idx: int = 10  # token ID of the '0' padding character
+    pad_zero_idx: int = 0  # token ID of the \x00 padding byte
 
     # processor
     processor_dim: Optional[int] = None  # dim the processor operates at (default: 3/2 * dim)

@@ -14,12 +14,12 @@ seed: 42
 dataset:
     name: tinystories
 
-    path: /gpfs/data/ranganathlab/Jatin/model_architecture_stuff/data/tinystories_char500m_zeropadded_mod15
-    tokenizer_name: bicycleman15/tinystories-gpt4-clean-tokenizer
-    vocab_size: 75
+    path: /gpfs/data/ranganathlab/Jatin/model_architecture_stuff/data/fineweb_byte_1b_zeropadded_mod15
+    tokenizer_name: byte
+    vocab_size: 256
 
-    # token_id of the '0' padding character
-    zero_padding_idx: 10
+    # token_id of the \x00 padding byte
+    zero_padding_idx: 0
     # whether to mask zero-padding tokens from training loss
     mask_zero_padding: false
 

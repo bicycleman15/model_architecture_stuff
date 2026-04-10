@@ -119,7 +119,7 @@ def validate(model, val_dataloader, device, eval_iters=None, bytes_per_token=Non
 
 
 @torch.no_grad()
-def validate_char_only(model, val_dataloader, device, eval_iters=None, bytes_per_token=None, pad_zero_idx=10):
+def validate_char_only(model, val_dataloader, device, eval_iters=None, bytes_per_token=None, pad_zero_idx=0):
     """Like validate(), but masks out zero-padding tokens (target == pad_zero_idx) from loss."""
     model.eval()
     total_loss = 0.0

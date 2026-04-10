@@ -4,7 +4,7 @@
 #SBATCH --output=slurm_logs/%j_%x.out
 #SBATCH --error=slurm_logs/%j_%x.err
 #SBATCH --export=ALL
-#SBATCH --time=6:00:00
+#SBATCH --time=4:00:00
 #SBATCH --gres=gpu:1
 #SBATCH --mem=32G
 #SBATCH --cpus-per-task=8
@@ -19,8 +19,8 @@
 # accelerate launch --config-file accelerate.yaml --mixed_precision=bf16 --num_processes=1 char_train.py \
 # --config-path config/dynamic_chunk \
 # --config-name char.yaml \
-# wandb.project="tinystories-padded-mod15" \
-# wandb.exp_name="masked-train flat 6L lr 8e-4" \
+# wandb.project="fineweb-1b-byte-padded-mod15" \
+# wandb.exp_name="mask flat 6L lr 8e-4" \
 # \
 # train.batch_size=32 \
 # train.global_batch_size=32 \
@@ -41,11 +41,12 @@
 # dataset.mask_zero_padding=true
 
 
-accelerate launch --config-file accelerate.yaml --mixed_precision=bf16 --num_processes=1 train.py \
+# WANDB_MODE=offline \
+accelerate launch --config-file accelerate.yaml --mixed_precision=bf16 --num_processes=1 char_train.py \
 --config-path config/dynamic_chunk \
 --config-name char.yaml \
-wandb.project="tinystories-padded-mod15" \
-wandb.exp_name="masked-train spacebyte 6L lr 8e-4" \
+wandb.project="fineweb-1b-byte-padded-mod15" \
+wandb.exp_name="mask spacebyte 6L lr 8e-4" \
 \
 train.batch_size=16 \
 train.global_batch_size=32 \
@@ -65,9 +66,9 @@ hourglass.chunk_size=5 \
 \
 hourglass.dim=768 \
 hourglass.n_head=12 \
-hourglass.n_compressor_layers=3 \
+hourglass.n_compressor_layers=2 \
 hourglass.n_processor_layers=6 \
-hourglass.n_decoder_layers=3 \
+hourglass.n_decoder_layers=2 \
 \
 dataset.mask_zero_padding=true
 
