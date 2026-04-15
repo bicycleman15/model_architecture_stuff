@@ -16,59 +16,59 @@
 
 
 # WANDB_MODE=offline \
-# accelerate launch --config-file accelerate.yaml --mixed_precision=bf16 --num_processes=1 char_train.py \
-# --config-path config/dynamic_chunk \
-# --config-name char.yaml \
-# wandb.project="fineweb-1b-byte-padded-mod15" \
-# wandb.exp_name="mask flat 6L lr 8e-4" \
-# \
-# train.batch_size=32 \
-# train.global_batch_size=32 \
-# \
-# train.train_steps=4000 \
-# eval.eval_interval=400 \
-# eval.eval_iters=50 \
-# \
-# optimizer.lr=8e-4 \
-# optimizer.min_lr=8e-5 \
-# \
-# model_type=transformer \
-# transformer.block_size=8192 \
-# transformer.n_layer=6 \
-# transformer.dim=768 \
-# transformer.n_head=12 \
-# \
-# dataset.mask_zero_padding=true
-
-
-# WANDB_MODE=offline \
 accelerate launch --config-file accelerate.yaml --mixed_precision=bf16 --num_processes=1 char_train.py \
 --config-path config/dynamic_chunk \
 --config-name char.yaml \
 wandb.project="fineweb-1b-byte-padded-mod15" \
-wandb.exp_name="fix lr uniform-5 6L lr 8e-4" \
+wandb.exp_name="flat 6L 1.5D lr 8e-4" \
 \
 train.batch_size=16 \
 train.global_batch_size=32 \
 \
 train.train_steps=4000 \
-train.warmup_steps=400 \
 eval.eval_interval=400 \
 eval.eval_iters=50 \
 \
 optimizer.lr=8e-4 \
 optimizer.min_lr=8e-5 \
 \
-model_type=hourglass \
-hourglass.block_size=8192 \
-hourglass.chunk_method="uniform" \
-hourglass.chunk_size=5 \
-\
-hourglass.dim=768 \
-hourglass.n_head=12 \
-hourglass.n_compressor_layers=2 \
-hourglass.n_processor_layers=6 \
-hourglass.n_decoder_layers=2 \
+model_type=transformer \
+transformer.block_size=8192 \
+transformer.n_layer=6 \
+transformer.dim=1152 \
+transformer.n_head=18 \
+# \
+# dataset.mask_zero_padding=true
+
+
+# WANDB_MODE=offline \
+# accelerate launch --config-file accelerate.yaml --mixed_precision=bf16 --num_processes=1 char_train.py \
+# --config-path config/dynamic_chunk \
+# --config-name char.yaml \
+# wandb.project="fineweb-1b-byte-padded-mod15" \
+# wandb.exp_name="fix lr uniform-5 6L lr 8e-4" \
+# \
+# train.batch_size=16 \
+# train.global_batch_size=32 \
+# \
+# train.train_steps=4000 \
+# train.warmup_steps=400 \
+# eval.eval_interval=400 \
+# eval.eval_iters=50 \
+# \
+# optimizer.lr=8e-4 \
+# optimizer.min_lr=8e-5 \
+# \
+# model_type=hourglass \
+# hourglass.block_size=8192 \
+# hourglass.chunk_method="uniform" \
+# hourglass.chunk_size=5 \
+# \
+# hourglass.dim=768 \
+# hourglass.n_head=12 \
+# hourglass.n_compressor_layers=2 \
+# hourglass.n_processor_layers=6 \
+# hourglass.n_decoder_layers=2 \
 # \
 # dataset.mask_zero_padding=true
 
