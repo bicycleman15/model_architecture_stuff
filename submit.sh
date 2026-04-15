@@ -14,29 +14,31 @@
 # use `sbatch submit.slurm`
 # note we do not have WANDB_MODE=offline here because we are submitting the job to the cluster
 
+# WANDB_MODE=offline \
+accelerate launch --config-file accelerate.yaml --mixed_precision=bf16 --num_processes=1 train.py --config-path config --config-name byte.yaml wandb.project=fineweb-byte-2 "wandb.exp_name=llamabyte 6L 1.5D lr 8e-4" train.batch_size=32 train.global_batch_size=256 train.train_steps=8000 eval.eval_interval=800 eval.eval_iters=100 optimizer.lr=8e-4 optimizer.min_lr=8e-5 model_type=transformer transformer.block_size=1024 transformer.n_layer=6 transformer.dim=1152 transformer.n_head=18
 
 # WANDB_MODE=offline \
-accelerate launch --config-file accelerate.yaml --mixed_precision=bf16 --num_processes=1 char_train.py \
---config-path config/dynamic_chunk \
---config-name char.yaml \
-wandb.project="fineweb-1b-byte-padded-mod15" \
-wandb.exp_name="flat 6L 1.5D lr 8e-4" \
-\
-train.batch_size=16 \
-train.global_batch_size=32 \
-\
-train.train_steps=4000 \
-eval.eval_interval=400 \
-eval.eval_iters=50 \
-\
-optimizer.lr=8e-4 \
-optimizer.min_lr=8e-5 \
-\
-model_type=transformer \
-transformer.block_size=8192 \
-transformer.n_layer=6 \
-transformer.dim=1152 \
-transformer.n_head=18 \
+# accelerate launch --config-file accelerate.yaml --mixed_precision=bf16 --num_processes=1 char_train.py \
+# --config-path config \
+# --config-name byte.yaml \
+# wandb.project="fineweb-byte-2" \
+# wandb.exp_name="flat 6L 1.5D lr 8e-4" \
+# \
+# train.batch_size=16 \
+# train.global_batch_size=32 \
+# \
+# train.train_steps=4000 \
+# eval.eval_interval=400 \
+# eval.eval_iters=50 \
+# \
+# optimizer.lr=8e-4 \
+# optimizer.min_lr=8e-5 \
+# \
+# model_type=transformer \
+# transformer.block_size=8192 \
+# transformer.n_layer=6 \
+# transformer.dim=1152 \
+# transformer.n_head=18
 # \
 # dataset.mask_zero_padding=true
 
