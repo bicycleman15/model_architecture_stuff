@@ -14,14 +14,14 @@ seed: 42
 dataset:
     name: fineweb
 
-    path: /gpfs/data/ranganathlab/Jatin/model_architecture_stuff/data/fineweb-1b-gpt2
+    path: /gpfs/data/ranganathlab/Jatin/model_architecture_stuff/data/fineweb-5b
     tokenizer_name: "gpt2"
     vocab_size: 50257
 
 results_dir: Results
 
 wandb:
-    project: fineweb-byte
+    project: fineweb-bpe
     exp_name: default
 
 ################################################################################
@@ -96,6 +96,28 @@ transformer:
     n_head: 12
 
     use_fused_ops: True
+    use_qk_norm: True
+
+
+path_transformer:
+    name: path_transformer
+
+    dim: 768
+    block_size: 2048
+
+    n_layer: 12
+    n_head: 12
+
+    initializer_range: 0.02
+
+    # Tikhonov damping inside PathPreservingAutograd.backward:
+    #   modified_grad = grad_output / (softmax(theta) + damping)
+    # Smaller => closer to exact natural gradient (more aggressive 1/p scaling);
+    # larger => more conservative (caps the max rescale at ~1/damping).
+    damping: 0.01
+
+    # PathPreservingAutograd needs raw logits, so fused linear+CE is disabled.
+    use_fused_ops: False
     use_qk_norm: True
 
 

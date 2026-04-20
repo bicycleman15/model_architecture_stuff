@@ -3,25 +3,26 @@
 WANDB_MODE=offline \
 accelerate launch --config-file accelerate.yaml --mixed_precision=bf16 --num_processes=1 train.py \
 --config-path config \
---config-name byte.yaml \
-wandb.project="fineweb-byte-2" \
-wandb.exp_name="llamabyte 6L lr 8e-4" \
+--config-name bpe.yaml \
+wandb.project="fineweb-1b" \
+wandb.exp_name="path 12L lr 1e-3" \
 \
 train.batch_size=32 \
 train.global_batch_size=256 \
 \
-train.train_steps=8000 \
-eval.eval_interval=800 \
+train.train_steps=4000 \
+eval.eval_interval=400 \
 eval.eval_iters=100 \
 \
-optimizer.lr=8e-4 \
-optimizer.min_lr=8e-5 \
+optimizer.lr=1e-3 \
+optimizer.min_lr=1e-4 \
 \
-model_type=transformer \
-transformer.block_size=1024 \
-transformer.n_layer=6 \
-transformer.dim=768 \
-transformer.n_head=12
+model_type=path_transformer \
+path_transformer.block_size=1024 \
+path_transformer.n_layer=12 \
+path_transformer.dim=768 \
+path_transformer.n_head=12 \
+path_transformer.use_fused_ops=True
 
 # hourglass
 WANDB_MODE=offline \

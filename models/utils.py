@@ -1,4 +1,5 @@
 from models.transformer import TransformerConfig, Transformer
+from models.path_transformer import PathTransformer
 from models.residual.mean_residual_transformer import MeanResidualTransformerConfig, MeanResidualTransformer
 from models.hourglass import Config as HourglassConfig, HierarchicalLM
 
@@ -29,6 +30,32 @@ def get_model(cfg):
             use_qk_norm=use_qk_norm,
         )
         model = Transformer(config)
+        return config, model
+
+    elif name == "path_transformer":
+        initializer_range = cfg.model.get("initializer_range", 0.02)
+        damping = cfg.model.get("damping", 1e-2)
+        # if use_fused_ops:
+        #     raise ValueError(
+        #         "path_transformer does not support use_fused_ops=True "
+        #         "(LigerFusedLinearCrossEntropyLoss hides the logits that "
+        #         "PathPreservingAutograd needs to wrap)."
+        #     )
+        config = TransformerConfig(
+            vocab_size=vocab_size,
+            block_size=cfg.model.block_size,
+
+            n_layer=cfg.model.n_layer,
+            dim=cfg.model.dim,
+            n_head=cfg.model.n_head,
+
+            initializer_range=initializer_range,
+            norm_eps=norm_eps,
+
+            use_fused_ops=use_fused_ops,
+            use_qk_norm=use_qk_norm,
+        )
+        model = PathTransformer(config, damping=damping)
         return config, model
 
     elif name == "mean_residual_transformer":
