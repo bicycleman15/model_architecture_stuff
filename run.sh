@@ -254,9 +254,10 @@ optimizer.weight_decay=1e-6 \
 curriculum.enabled=false
 
 # --- Transformer baseline (paper doesn't use this; curriculum usually helps here) ---
-# WANDB_MODE=offline \
-# accelerate launch --config-file accelerate.yaml --mixed_precision=bf16 --num_processes=1 \
-# -m state_tracking.train --config-path config --config-name state_tracking.yaml \
-# model=transformer data=s3_128 \
-# batch_size=256 schedule.epochs=100 optimizer.lr=3e-4 \
-# curriculum.enabled=true curriculum.start_idx=2 curriculum.loss_threshold=0.3
+WANDB_MODE=offline \
+accelerate launch --config-file accelerate.yaml --mixed_precision=bf16 --num_processes=1 \
+-m state_tracking.train --config-path config --config-name state_tracking.yaml \
+model=transformer data=s3_128 \
+batch_size=2048 schedule.epochs=30 optimizer.lr=1e-3 \
+optimizer.weight_decay=1e-6 \
+curriculum.enabled=false
