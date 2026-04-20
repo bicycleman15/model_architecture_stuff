@@ -1,0 +1,12 @@
+# Paper setup: train at k=128, evaluate length-extrapolation at k_test=512.
+# Expects CSVs produced by:
+#   python -m state_tracking.generate_data --group=S3 --k=128 --samples=2000000
+#   python -m state_tracking.generate_data --group=S3 --k=512 --samples=500000
+group: S3
+k: 128
+k_test: 512
+data_dir: ${hydra:runtime.cwd}/state_tracking/data
+train_size: 1.0
+max_samples: null
+# Workers for datasets.map() tokenization. null -> auto (min(16, cpus-1)).
+map_num_proc: null

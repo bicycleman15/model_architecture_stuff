@@ -210,3 +210,53 @@ mean_residual_transformer.n_layer=36 \
 mean_residual_transformer.dim=256 \
 mean_residual_transformer.n_head=4 \
 mean_residual_transformer.mean_power=2
+
+
+
+#### state tracking
+
+# Paper: arXiv:2502.10297, Appendix C.1
+#   S_3: train at k=128 (2M samples), eval length-extrapolation at k=512 (500k samples)
+#   single-layer DeltaProduct, 12 heads, head_dim=32
+#   batch=2048, lr=1e-3 cosine, epochs=100, wd=1e-6, AdamW
+#   no curriculum over sequence length
+
+# --- generate datasets (once; skips if CSVs already exist) ---
+# python -m state_tracking.generate_data --group=S3 --k=128 --samples=2000000
+# python -m state_tracking.generate_data --group=S3 --k=512 --samples=500000
+
+# --- train: DeltaProduct (n_h=2) on S_3, k=128 train / k=512 eval ---
+WANDB_MODE=offline \
+accelerate launch --config-file accelerate.yaml --mixed_precision=bf16 --num_processes=1 \
+-m state_tracking.train \
+--config-path config \
+--config-name state_tracking.yaml \
+model=deltaproduct \
+data=s3_128 \
+batch_size=2048 \
+schedule.epochs=100 \
+optimizer.lr=1e-3 \
+optimizer.weight_decay=1e-6 \
+curriculum.enabled=false
+
+# --- DeltaNet (n_h=1) ---
+WANDB_MODE=offline \
+accelerate launch --config-file accelerate.yaml --mixed_precision=bf16 --num_processes=1 \
+-m state_tracking.train \
+--config-path config \
+--config-name state_tracking.yaml \
+model=deltanet \
+data=s3_128 \
+batch_size=2048 \
+schedule.epochs=100 \
+optimizer.lr=1e-3 \
+optimizer.weight_decay=1e-6 \
+curriculum.enabled=false
+
+# --- Transformer baseline (paper doesn't use this; curriculum usually helps here) ---
+# WANDB_MODE=offline \
+# accelerate launch --config-file accelerate.yaml --mixed_precision=bf16 --num_processes=1 \
+# -m state_tracking.train --config-path config --config-name state_tracking.yaml \
+# model=transformer data=s3_128 \
+# batch_size=256 schedule.epochs=100 optimizer.lr=3e-4 \
+# curriculum.enabled=true curriculum.start_idx=2 curriculum.loss_threshold=0.3

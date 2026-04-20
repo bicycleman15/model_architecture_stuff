@@ -1,0 +1,7 @@
+group: S3
+k: 512
+k_test: 2048
+data_dir: ${hydra:runtime.cwd}/state_tracking/data
+train_size: 0.99
+max_samples: null
+map_num_proc: null

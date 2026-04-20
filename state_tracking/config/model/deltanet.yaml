@@ -1,0 +1,9 @@
+# DeltaNet = DeltaProduct with num_householder=1. Same capacity as the paper's
+# DeltaProduct config so the two are directly comparable.
+name: deltanet
+d_state: 128
+n_layers: 1
+n_heads: 4
+head_dim: 32
+num_householder: 1
+allow_neg_eigval: true

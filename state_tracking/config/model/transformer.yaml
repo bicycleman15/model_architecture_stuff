@@ -1,0 +1,5 @@
+name: transformer
+dim: 128
+n_layer: 2
+n_head: 4
+block_size: 2112

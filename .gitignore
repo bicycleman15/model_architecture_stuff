@@ -207,7 +207,12 @@ marimo/_lsp/
 __marimo__/
 
 # tokenized datasets here
+# NOTE: `data/` is unanchored, so it matches any directory named `data` at any
+# depth (e.g. `./data/`, `./state_tracking/data/`). The negations below keep
+# the Hydra data-configs dir `state_tracking/config/data/` tracked.
 data/
+!state_tracking/config/data/
+!state_tracking/config/data/**
 
 wandb/
 checkpoints/
@@ -217,3 +222,7 @@ slurm_logs/
 Results/
 
 run/
+
+outputs/
+
+src/
