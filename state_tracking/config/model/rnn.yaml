@@ -1,0 +1,13 @@
+# M2RNN-based RNN baseline. Matches the DeltaProduct paper's S_3 scale:
+# single layer, hidden 384, 12 heads, head_dim 32 for fair comparison.
+#
+# State tensor shape: [B, S, N, K, V] = [B, S, 12, 32, 32]. At B=2048, S=128
+# this is ~12 GB fp32 / ~6 GB bf16 per layer, so the default command in run.sh
+# uses a smaller batch than DeltaProduct.
+name: rnn
+hidden_size: 384
+intermediate_size: 1024
+n_layers: 1
+num_heads: 12
+key_head_dim: 32
+value_head_dim: 32

@@ -15,4 +15,8 @@ def get_model(cfg, vocab_size: int):
         from state_tracking.models.transformer import build_transformer
         return build_transformer(vocab_size, cfg.model)
 
+    if name == "rnn":
+        from state_tracking.models.rnn import build_rnn
+        return build_rnn(vocab_size, cfg.model)
+
     raise ValueError(f"Unknown model name: {name!r}")
