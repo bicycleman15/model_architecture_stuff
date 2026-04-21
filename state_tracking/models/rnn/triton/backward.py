@@ -166,13 +166,17 @@ def _m2rnn_backward_triton_kernel(
 
     xf_ptrs = xf_ptr + BLOCK_ID_B * xf_stride_b + _S * xf_stride_s + BLOCK_ID_Nxf * xf_stride_n
 
+    # NOTE: h is [B, S, N, K, V] - at large (B, S) the batch offset
+    # `BLOCK_ID_B * h_stride_b` can exceed signed i32 range (see the
+    # forward kernel comment). Cast to int64 before multiplying so the
+    # whole sum is evaluated in 64 bits.
     h_ptrs = (
         h_ptr
-        + tl.cast(BLOCK_ID_B * h_stride_b, tl.uint32)
-        + tl.cast(_S * h_stride_s, tl.uint32)
-        + tl.cast(BLOCK_ID_N * h_stride_n, tl.uint32)
-        + tl.cast(BLOCK_K[:, None] * h_stride_k, tl.uint32)
-        + tl.cast(BLOCK_V[None, :] * h_stride_v, tl.uint32)
+        + tl.cast(BLOCK_ID_B, tl.int64) * h_stride_b
+        + _S * h_stride_s
+        + BLOCK_ID_N * h_stride_n
+        + BLOCK_K[:, None] * h_stride_k
+        + BLOCK_V[None, :] * h_stride_v
     )
 
     dxf_ptrs = dxf_ptr + BLOCK_ID_B * dxf_stride_b + _S * dxf_stride_s + BLOCK_ID_Nxf * dxf_stride_n

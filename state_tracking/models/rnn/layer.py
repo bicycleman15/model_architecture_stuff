@@ -12,6 +12,8 @@
 
 from __future__ import annotations
 
+import math
+
 import torch
 import torch.nn as nn
 
@@ -87,7 +89,15 @@ class M2RNNLayer(nn.Module):
 
     @torch.no_grad()
     def reset_parameters(self) -> None:
-        nn.init.normal_(self.state_weight)
+        # Upstream uses std=1 here, but for fixed-length BPTT with S=128 and
+        # V=32 that blows up backward: a Gaussian V x V matrix at std=1 has
+        # operator norm O(sqrt(V)) ~ 5.7, and the Jacobian of the recurrence
+        # compounds like W^S in the backward pass, so gradients hit ~1e30,
+        # overflow fp32 inside clip_grad_norm_, and all grads get silently
+        # zeroed. Xavier-style fan-in scaling (std = 1/sqrt(V)) keeps the
+        # spectral radius O(1) at init so BPTT is numerically stable.
+        nn.init.normal_(self.state_weight, std=1.0 / math.sqrt(self.value_head_dim))
+        # nn.init.normal_(self.state_weight, std=1.0)
 
     def forward(
         self,

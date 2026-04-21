@@ -42,6 +42,7 @@ class RNNBlock(nn.Module):
         key_head_dim: int,
         value_head_dim: int,
         backend: str = "torch",
+        gradient_clipping: float | None = None,
     ) -> None:
         super().__init__()
         self.norm1 = nn.RMSNorm(hidden_size)
@@ -56,7 +57,7 @@ class RNNBlock(nn.Module):
             num_forget_input_heads=num_heads,
             num_weight_heads=num_heads,
             add_bias=False,
-            gradient_clipping=None,
+            gradient_clipping=gradient_clipping,
             backend=backend,
         )
         self.norm2 = nn.RMSNorm(hidden_size)
@@ -82,6 +83,7 @@ class RNNModel(nn.Module):
         key_head_dim: int,
         value_head_dim: int,
         backend: str = "torch",
+        gradient_clipping: float | None = None,
     ) -> None:
         super().__init__()
         self.embed = nn.Embedding(vocab_size, hidden_size)
@@ -94,6 +96,7 @@ class RNNModel(nn.Module):
                     key_head_dim=key_head_dim,
                     value_head_dim=value_head_dim,
                     backend=backend,
+                    gradient_clipping=gradient_clipping,
                 )
                 for _ in range(n_layers)
             ]
@@ -115,6 +118,7 @@ class RNNModel(nn.Module):
 
 def build_rnn(vocab_size: int, mcfg) -> RNNModel:
     backend = getattr(mcfg, "backend", "torch") or "torch"
+    gradient_clipping = getattr(mcfg, "gradient_clipping", None)
     return RNNModel(
         vocab_size=vocab_size,
         hidden_size=mcfg.hidden_size,
@@ -124,4 +128,5 @@ def build_rnn(vocab_size: int, mcfg) -> RNNModel:
         key_head_dim=mcfg.key_head_dim,
         value_head_dim=mcfg.value_head_dim,
         backend=backend,
+        gradient_clipping=gradient_clipping,
     )

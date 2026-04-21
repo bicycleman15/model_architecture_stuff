@@ -277,11 +277,26 @@ accelerate launch --config-file accelerate.yaml --mixed_precision=bf16 --num_pro
 model=rnn \
 data=s3_128 \
 batch_size=512 \
-schedule.epochs=100 \
+schedule.epochs=30 \
 optimizer.lr=1e-3 \
 optimizer.weight_decay=1e-6 \
 optimizer.grad_clip=1.0 \
 curriculum.enabled=false
+
+# --- M2RNN one-batch overfit sanity check ---
+# Freezes one training batch and hammers the model on it for N steps.
+# Loss should collapse towards 0 and token_acc towards 1.0 within a
+# few hundred steps; otherwise something in the model / autograd path
+# is broken. Small batch so it fits comfortably on a single GPU.
+WANDB_MODE=offline \
+accelerate launch --config-file accelerate.yaml --mixed_precision=bf16 --num_processes=1 \
+-m state_tracking.overfit \
+--config-path config --config-name state_tracking.yaml \
+model=rnn data=s3_128 \
+batch_size=32 \
+optimizer.lr=1e-3 optimizer.grad_clip=1.0 \
+curriculum.enabled=false \
++overfit.steps=500 +overfit.log_every=10 model.backend=torch model.gradient_clipping=1.0
 
 
 #### path preserving stuff

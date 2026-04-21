@@ -16,3 +16,5 @@ value_head_dim: 32
 # works on CPU too). Correctness is equivalent (triton fuses the matmul + tanh
 # + gate per timestep); "torch" is kept as a fallback / debugging path.
 backend: triton
+
+gradient_clipping: null

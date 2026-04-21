@@ -10,14 +10,28 @@
 #     reference recurrence is kept. PyTorch autograd handles the backward
 #     natively through the Python time loop.
 #   - cu_seqlens / variable-length path removed (we train on fixed lengths).
-#   - `tanh` is just torch.tanh and `clip_gradients` is a plain clamp
-#     (upstream uses a straight-through-estimator variant; for fixed-length
-#     S_3 training the difference is negligible).
+#   - `tanh` is just torch.tanh.
+#   - `_clip_gradients` matches upstream `xma/torch_utils.py:clip_gradients`:
+#     identity in forward, clamp(-c, c) on the state gradient in backward.
+#     This is a per-timestep STE; applying it at each step of the recurrence
+#     keeps ||dh|| bounded across the BPTT unroll, which is how upstream
+#     stays stable with `nn.init.normal_(state_weight, std=1)`.
 # **************************************************
 
 from __future__ import annotations
 
 import torch
+import torch.nn.functional as F
+
+
+def _tanh(x: torch.Tensor) -> torch.Tensor:
+    """Upstream `xma/torch_utils.py:tanh` — always computes in fp32.
+
+    This matters under bf16 autocast: tanh saturates hard near +/-1, and
+    computing it in bf16 loses measurable precision vs. fp32. Upstream
+    always upcasts, so we do too.
+    """
+    return F.tanh(x.float()).type_as(x)
 
 
 def divide_if_divisible(a: int, b: int) -> int:
@@ -52,10 +66,28 @@ def _get_num_heads(
     return Nq, Nk, Nv, Nw, Nxf, N
 
 
+class _ClipGradients(torch.autograd.Function):
+    """Straight-through estimator that clips the STATE GRADIENT in backward.
+
+    Forward is identity; backward clamps the incoming grad to [-c, c].
+    Vendored 1:1 from upstream `xma/torch_utils.py:_ClipGradients`.
+    """
+
+    @staticmethod
+    def forward(ctx, x: torch.Tensor, c: float) -> torch.Tensor:
+        ctx.gradient_clipping = c
+        return x
+
+    @staticmethod
+    def backward(ctx, x_grad: torch.Tensor):
+        c = ctx.gradient_clipping
+        return x_grad.clip(-c, c), None
+
+
 def _clip_gradients(x: torch.Tensor, c: float | None) -> torch.Tensor:
     if c is None:
         return x
-    return x.clamp(-c, c)
+    return _ClipGradients.apply(x, c)
 
 
 def _m2rnn_torch(
@@ -113,9 +145,6 @@ def _m2rnn_torch(
     W = weight.repeat_interleave(Gw, dim=0)
     xf = forget_input.repeat_interleave(Gxf, dim=-1)
 
-    if gradient_clipping is not None and gradient_clipping < 0:
-        gradient_clipping = -gradient_clipping
-
     # Outer product per timestep: x[b,s,n,i,j] = k[b,s,n,i] * v[b,s,n,j]
     x = k.unsqueeze(-1) * v.unsqueeze(-2)  # [B, S, N, K, V]
     Wb = W.unsqueeze(0)                    # [1, N, V, V]
@@ -130,7 +159,7 @@ def _m2rnn_torch(
 
     for s in range(S):
         f = xf[:, s, :, None, None]        # [B, N, 1, 1]
-        h_new = torch.tanh(h @ Wb + x[:, s])
+        h_new = _tanh(h @ Wb + x[:, s])
         h = f * h + (1.0 - f) * h_new
         h = _clip_gradients(h, gradient_clipping)
         states[:, s] = h
@@ -245,6 +274,11 @@ def m2rnn(
         "torch"  - pure-PyTorch reference (works on CPU and CUDA).
         "triton" - vendored triton kernels from upstream. CUDA only.
     """
+    # Match upstream `xma/layers/m2rnn/op.py:m2rnn`: negative clipping
+    # values are taken as absolute value at the wrapper level.
+    if gradient_clipping is not None and gradient_clipping < 0:
+        gradient_clipping = -gradient_clipping
+
     if backend == "triton":
         if not torch.cuda.is_available():
             raise RuntimeError("m2rnn: triton backend requires CUDA")

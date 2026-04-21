@@ -156,12 +156,19 @@ def _m2rnn_forward_triton_kernel(
     xf_ptrs = xf_ptr + BLOCK_ID_B * xf_stride_b + BLOCK_ID_Nxf * xf_stride_n
 
     if h_ptr is not None:
+        # NOTE: h is a [B, S, N, K, V] state tape. For eval (S=512, B=512,
+        # K=V=32, N=12) the batch stride is 6.29M elements and
+        # BLOCK_ID_B * h_stride_b reaches ~3.2B, which overflows signed
+        # i32. Cast one operand to int64 so the full offset is computed
+        # in 64 bits. (Upstream's `tl.cast(..., tl.uint32)` after the
+        # product doesn't prevent the overflow that happens *inside*
+        # the product.)
         h_ptrs = (
             h_ptr
-            + tl.cast(BLOCK_ID_B * h_stride_b, tl.uint32)
-            + tl.cast(BLOCK_ID_N * h_stride_n, tl.uint32)
-            + tl.cast(BLOCK_K[:, None] * h_stride_k, tl.uint32)
-            + tl.cast(BLOCK_V[None, :] * h_stride_v, tl.uint32)
+            + tl.cast(BLOCK_ID_B, tl.int64) * h_stride_b
+            + BLOCK_ID_N * h_stride_n
+            + BLOCK_K[:, None] * h_stride_k
+            + BLOCK_V[None, :] * h_stride_v
         )
 
     if q_ptr is not None:

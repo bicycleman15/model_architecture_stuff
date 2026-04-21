@@ -47,9 +47,18 @@ field in `state_tracking/config/model/rnn.yaml`) selects between them.
   path; the state-tracking task uses fixed-length sequences.
 - Inlined tiny helpers that originally lived in `xma.math` /
   `xma.utils` / `xma.torch_utils` (`divide_if_divisible`,
-  `clip_gradients`, `tanh`). `clip_gradients` here is a plain `clamp`;
-  upstream uses a straight-through variant, but for fixed-length S_n
-  training the difference is negligible.
+  `clip_gradients`, `tanh`). `_clip_gradients` is the upstream
+  straight-through-estimator: identity in forward, clamp(-c, c) on the
+  STATE GRADIENT in backward (see `xma/torch_utils.py:_ClipGradients`).
+  It's applied to `h` at every timestep inside the recurrence, which is
+  how upstream stays stable with `nn.init.normal_(state_weight, std=1)`
+  across deep BPTT unrolls. A forward `clamp` — which is what this file
+  initially shipped with — is semantically wrong: it constrains `h`
+  forward to [-c, c], but because `f` is an unconstrained linear
+  projection (not sigmoid), the real `h = f*h0 + (1-f)*h_new` regularly
+  exceeds [-c, c], so the clamp saturates and its backward zeros out
+  gradients for any (b, s, n, k, v) position where |h| >= c. With
+  c=1.0 that killed learning on the torch path.
 
 ### Triton path (`triton/forward.py`, `triton/backward.py`)
 
