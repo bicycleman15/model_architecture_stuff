@@ -279,3 +279,30 @@ optimizer.lr=1e-3 \
 optimizer.weight_decay=1e-6 \
 optimizer.grad_clip=1.0 \
 curriculum.enabled=false
+
+
+#### path preserving stuff
+
+accelerate launch --config-file accelerate.yaml --mixed_precision=bf16 --num_processes=1 overfit.py \
+--config-path config \
+--config-name bpe.yaml \
+wandb.project="overfit-path" \
+wandb.exp_name="path 12L lr 1e-3 damping 1e-1" \
+\
+train.batch_size=32 \
+train.global_batch_size=256 \
+\
+train.train_steps=4000 \
+eval.eval_interval=400 \
+eval.eval_iters=100 \
+\
+optimizer.lr=1e-3 \
+optimizer.min_lr=1e-4 \
+\
+model_type=path_transformer \
+path_transformer.block_size=1024 \
+path_transformer.n_layer=12 \
+path_transformer.dim=768 \
+path_transformer.n_head=12 \
+path_transformer.use_fused_ops=True \
+path_transformer.damping=1e-1
