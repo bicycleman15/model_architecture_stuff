@@ -58,7 +58,7 @@ def _clip_gradients(x: torch.Tensor, c: float | None) -> torch.Tensor:
     return x.clamp(-c, c)
 
 
-def m2rnn(
+def _m2rnn_torch(
     query: torch.Tensor,
     key: torch.Tensor,
     value: torch.Tensor,
@@ -143,3 +143,116 @@ def m2rnn(
     y = (q.unsqueeze(-2) @ states).squeeze(-2)
 
     return y, h
+
+
+class _M2RNNTritonFunction(torch.autograd.Function):
+    """torch.autograd.Function wrapper around the vendored triton kernels.
+
+    Lives in this module (not in `triton/`) so that we don't import triton
+    at top level — the kernels are only loaded when the user picks the
+    triton backend (and therefore must be on CUDA).
+    """
+
+    @staticmethod
+    def forward(ctx, q, k, v, W, xf, h0, gradient_clipping):
+        from state_tracking.models.rnn.triton.forward import _m2rnn_forward_triton
+
+        Nq, Nk, Nv, Nw, Nxf, N = _get_num_heads(q=q, k=k, v=v, W=W, xf=xf, run_check=True)
+
+        B, S, _, K = q.size()
+        V = v.size(-1)
+
+        ht = torch.empty(B, N, K, V, device=k.device, dtype=k.dtype)
+        h = torch.empty(B, S, N, K, V, device=k.device, dtype=k.dtype)
+        y = torch.empty(B, S, N, V, device=q.device, dtype=q.dtype)
+
+        _m2rnn_forward_triton(
+            q=q,
+            k=k,
+            v=v,
+            W=W,
+            xf=xf,
+            h0=h0,
+            h=h,
+            ht=ht,
+            y=y,
+            cu_seqlens=None,
+            Nq=Nq,
+            Nk=Nk,
+            Nv=Nv,
+            Nw=Nw,
+            Nxf=Nxf,
+            N=N,
+        )
+
+        ctx.save_for_backward(q, k, v, W, xf, h0 if h0 is not None else torch.empty(0), h)
+        ctx.has_h0 = h0 is not None
+        ctx.gradient_clipping = gradient_clipping
+        return y, ht
+
+    @staticmethod
+    def backward(ctx, dy, dht):  # dht is unused: upstream triton kernel doesn't feed it
+        from state_tracking.models.rnn.triton.backward import _m2rnn_backward_triton
+
+        q, k, v, W, xf, h0_saved, h = ctx.saved_tensors
+        h0 = h0_saved if ctx.has_h0 else None
+
+        dq = torch.empty_like(q)
+        dk = torch.empty_like(k)
+        dv = torch.empty_like(v)
+        # dW is accumulated atomically inside the kernel in fp32
+        dW = torch.zeros_like(W, dtype=torch.float32)
+        dxf = torch.empty_like(xf)
+        dh0 = torch.empty_like(h0) if (h0 is not None and h0.requires_grad) else None
+
+        _m2rnn_backward_triton(
+            q=q,
+            k=k,
+            v=v,
+            W=W,
+            xf=xf,
+            h0=h0,
+            dy=dy.contiguous(),
+            h=h,
+            dq=dq,
+            dk=dk,
+            dv=dv,
+            dW=dW,
+            dxf=dxf,
+            dh0=dh0,
+            cu_seqlens=None,
+            gradient_clipping=ctx.gradient_clipping,
+        )
+
+        return dq, dk, dv, dW.to(W.dtype), dxf, dh0, None
+
+
+def m2rnn(
+    query: torch.Tensor,
+    key: torch.Tensor,
+    value: torch.Tensor,
+    weight: torch.Tensor,
+    forget_input: torch.Tensor,
+    input_state: torch.Tensor | None = None,
+    gradient_clipping: float | None = None,
+    backend: str = "torch",
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """M2RNN recurrence with a backend switch.
+
+    Parameters
+    ----------
+    backend : {"torch", "triton"}
+        "torch"  - pure-PyTorch reference (works on CPU and CUDA).
+        "triton" - vendored triton kernels from upstream. CUDA only.
+    """
+    if backend == "triton":
+        if not torch.cuda.is_available():
+            raise RuntimeError("m2rnn: triton backend requires CUDA")
+        return _M2RNNTritonFunction.apply(
+            query, key, value, weight, forget_input, input_state, gradient_clipping
+        )
+    if backend != "torch":
+        raise ValueError(f"m2rnn: unknown backend {backend!r} (expected 'torch' or 'triton')")
+    return _m2rnn_torch(
+        query, key, value, weight, forget_input, input_state, gradient_clipping
+    )

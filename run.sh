@@ -266,6 +266,9 @@ curriculum.enabled=false
 # --- M2RNN baseline (vendored from open-lm-engine/accelerated-model-architectures) ---
 # State tensor is [B, S, N, K, V]; large heads + big batch OOMs easily, so
 # use a smaller batch than DeltaProduct.
+# Default uses the vendored triton kernel (model.backend=triton). Pass
+# `model.backend=torch` to fall back to the pure-PyTorch reference (slow;
+# useful for CPU debugging only).
 WANDB_MODE=offline \
 accelerate launch --config-file accelerate.yaml --mixed_precision=bf16 --num_processes=1 \
 -m state_tracking.train \

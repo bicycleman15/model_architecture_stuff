@@ -5,8 +5,9 @@
 #   xma/layers/m2rnn/layer.py
 #
 # Edits (for state_tracking baseline):
-#   - kernel_backend / cu_seqlens / max_seqlen arguments removed.
-#   - Uses the pure-PyTorch `m2rnn` op from .op (no triton).
+#   - cu_seqlens / max_seqlen arguments removed (fixed-length S_3 training).
+#   - Exposes a `backend` argument ("torch" or "triton") that is forwarded
+#     to the local `m2rnn` op.
 # **************************************************
 
 from __future__ import annotations
@@ -38,10 +39,12 @@ class M2RNNLayer(nn.Module):
         num_weight_heads: int,
         add_bias: bool = False,
         gradient_clipping: float | None = None,
+        backend: str = "torch",
     ) -> None:
         super().__init__()
 
         self.gradient_clipping = gradient_clipping
+        self.backend = backend
         self.key_head_dim = key_head_dim
         self.value_head_dim = value_head_dim
 
@@ -111,14 +114,24 @@ class M2RNNLayer(nn.Module):
                 -1, self.num_heads, self.key_head_dim, self.value_head_dim
             )
 
+        # The triton kernel's inner `tl.dot(h_prev, W)` requires matching
+        # dtypes for A and B. Under `accelerator.autocast`, activations
+        # (q/k/v/f) get cast to bf16 while `state_weight` is still an
+        # fp32 Parameter - so cast it to the active activation dtype
+        # before dispatching. (The pure-torch backend tolerates the mix
+        # via PyTorch's type promotion, but we do the same cast there
+        # for behavioural parity.)
+        weight = self.state_weight.to(q.dtype)
+
         out, new_state = m2rnn(
             query=q,
             key=k,
             value=v,
-            weight=self.state_weight,
+            weight=weight,
             forget_input=f,
             input_state=input_state,
             gradient_clipping=self.gradient_clipping,
+            backend=self.backend,
         )
 
         # out: [B, S, N, V] -> [B, S, N*V]

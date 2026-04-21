@@ -11,3 +11,8 @@ n_layers: 1
 num_heads: 12
 key_head_dim: 32
 value_head_dim: 32
+
+# "triton" (fused CUDA kernel, much faster) or "torch" (pure-PyTorch reference,
+# works on CPU too). Correctness is equivalent (triton fuses the matmul + tanh
+# + gate per timestep); "torch" is kept as a fallback / debugging path.
+backend: triton
