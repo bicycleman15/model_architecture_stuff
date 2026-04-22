@@ -67,17 +67,39 @@ eval:
 # Optimizer-related arguments
 optimizer:
 
-    # Learning rate 
+    # Which optimizer to use: adamw | sgd | muon
+    name: adamw
+
+    # Base learning rate (drives the cosine/warmup schedule for every param group)
     lr: 8e-4
 
     # Minimum learning rate
     min_lr: 8e-5
 
-    # Weight decay
+    # Weight decay (AdamW side when using Muon)
     weight_decay: 0.1
 
-    # Betas (beta1, beta2)
+    # Betas (beta1, beta2) -- used by AdamW (including the aux AdamW inside Muon)
     betas: [0.9, 0.95]
+
+    # ----- SGD-only -----
+    # Momentum for name=sgd
+    momentum: 0.9
+
+    # ----- Muon-only (name=muon) -----
+    # LR for the Muon (Newton-Schulz orthogonalized) matrix params
+    muon_lr: 0.02
+    # Decoupled weight decay for Muon params (usually 0)
+    muon_weight_decay: 0.0
+    # SGD-style momentum coefficient inside Muon
+    muon_momentum: 0.95
+    # Use Nesterov-style lookahead momentum
+    muon_nesterov: True
+    # Number of Newton-Schulz iterations per step (5 is canonical)
+    muon_ns_steps: 5
+    # LR for the aux AdamW group (embeddings / lm_head / norms / biases)
+    # Classical guidance is ~10x smaller than muon_lr
+    adamw_lr: 2e-3
 
 # results directory
 # don't change this, it will be set by the script

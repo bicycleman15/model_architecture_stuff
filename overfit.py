@@ -16,6 +16,7 @@ import wandb
 from models.utils import get_model
 from data_loader import ShardedDataLoader
 from utils import seed_everything, num_parameters, get_lr
+from muon import MuonWithAuxAdamW, build_muon_param_groups
 
 
 @hydra.main(config_path="config", config_name="residual/fineweb", version_base=None)
@@ -87,12 +88,43 @@ def main(cfg: DictConfig):
     wandb.define_metric("perf/*", step_metric="train/step")
 
     # --- optimizer ---
-    optimizer = torch.optim.AdamW(
-        [p for p in model.parameters() if p.requires_grad],
-        lr=cfg.optimizer.lr,
-        betas=tuple(cfg.optimizer.betas),
-        weight_decay=cfg.optimizer.weight_decay,
-    )
+    opt_name = str(cfg.optimizer.get("name", "adamw")).lower()
+    if opt_name == "muon":
+        muon_lr = cfg.optimizer.get("muon_lr", cfg.optimizer.lr)
+        adamw_lr = cfg.optimizer.get("adamw_lr", cfg.optimizer.lr)
+        param_groups = build_muon_param_groups(
+            model,
+            muon_lr=muon_lr,
+            muon_weight_decay=cfg.optimizer.get("muon_weight_decay", 0.0),
+            muon_momentum=cfg.optimizer.get("muon_momentum", 0.95),
+            muon_nesterov=cfg.optimizer.get("muon_nesterov", True),
+            muon_ns_steps=cfg.optimizer.get("muon_ns_steps", 5),
+            adamw_lr=adamw_lr,
+            adamw_betas=tuple(cfg.optimizer.betas),
+            adamw_weight_decay=cfg.optimizer.weight_decay,
+        )
+        optimizer = MuonWithAuxAdamW(param_groups)
+        n_muon = sum(len(g["params"]) for g in param_groups if g["use_muon"])
+        n_adamw = sum(len(g["params"]) for g in param_groups if not g["use_muon"])
+        print(f"Muon optimizer: {n_muon} matrix params @ lr={muon_lr}, "
+              f"{n_adamw} aux params on AdamW @ lr={adamw_lr}")
+    elif opt_name == "sgd":
+        optimizer = torch.optim.SGD(
+            [p for p in model.parameters() if p.requires_grad],
+            lr=cfg.optimizer.lr,
+            weight_decay=cfg.optimizer.weight_decay,
+            momentum=cfg.optimizer.get("momentum", 0.9),
+        )
+    else:
+        optimizer = torch.optim.AdamW(
+            [p for p in model.parameters() if p.requires_grad],
+            lr=cfg.optimizer.lr,
+            betas=tuple(cfg.optimizer.betas),
+            weight_decay=cfg.optimizer.weight_decay,
+        )
+
+    for pg in optimizer.param_groups:
+        pg["base_lr"] = pg["lr"]
 
     # --- overfit loop ---
     model.train()
@@ -105,8 +137,9 @@ def main(cfg: DictConfig):
             optimizer.zero_grad()
 
         lr = get_lr(cfg.optimizer.lr, opt_step, warmup_steps, overfit_steps, cfg.optimizer.min_lr)
+        lr_scale = lr / cfg.optimizer.lr if cfg.optimizer.lr > 0 else 1.0
         for pg in optimizer.param_groups:
-            pg["lr"] = lr
+            pg["lr"] = pg["base_lr"] * lr_scale
 
         x, y = micro_batches[it % grad_accum]
         with torch.amp.autocast("cuda", dtype=torch.bfloat16):
