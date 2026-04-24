@@ -1,16 +1,17 @@
 #!/bin/bash
 
 WANDB_MODE=offline \
-accelerate launch --config-file accelerate.yaml --mixed_precision=bf16 --num_processes=1 overfit.py \
+accelerate launch --config-file accelerate.yaml --mixed_precision=bf16 --num_processes=1 train.py \
 --config-path config \
 --config-name bpe.yaml \
 wandb.project="fineweb-1b" \
-wandb.exp_name="path 12L lr 1e-3 damp 1e-2 sgd momen 0.9" \
+wandb.exp_name="path 12L lr 1e-3 damp 1e-2" \
 \
 train.batch_size=32 \
 train.global_batch_size=256 \
 \
 train.train_steps=4000 \
+train.warmup_steps=400 \
 eval.eval_interval=400 \
 eval.eval_iters=100 \
 \

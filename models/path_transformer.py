@@ -20,7 +20,7 @@ class PathPreservingAutograd(torch.autograd.Function):
     @staticmethod
     def forward(ctx, theta, damping):
         
-        theta[..., -1] = 0
+        theta[..., -1] = 0 # this is the change!
 
         ctx.save_for_backward(theta)
         ctx.damping = damping
@@ -36,8 +36,8 @@ class PathPreservingAutograd(torch.autograd.Function):
         # max_p = torch.max(p, dim=-1, keepdim=True).values
         # min_p = torch.min(p, dim=-1, keepdim=True).values
 
-        factor = 1 / (p + ctx.damping)
-        # factor = (1 - p)
+        # factor = 1 / (p + ctx.damping) # the max value is ~100
+        factor = 1 / (ctx.damping + (p ** (grad_input ** 2)))
         # factor = (1 - max_p) * min_p / (p + 0.1)
         # factor = (1 - max_p) / (p + 0.1)
         # factor = 1
@@ -49,7 +49,11 @@ class PathPreservingAutograd(torch.autograd.Function):
 
         # breakpoint()
 
-        modified_grad -= einops.repeat(modified_grad[..., -1:], "... 1 -> ... v", v=modified_grad.shape[-1])
+        modified_grad -= einops.repeat(modified_grad[..., -1:], "... 1 -> ... v", v=modified_grad.shape[-1]) # this is the change!
+
+        # modified_grad is shape [B, L, V]
+        # we just subtract the last dim of modified_grad to say to optimizer we don't want to update the last logit
+        # basically modified_grad[..., -1] is zero!
 
         #modified_grad[..., -1] = 0
 

@@ -4,7 +4,7 @@
 #SBATCH --output=slurm_logs/%j_%x.out
 #SBATCH --error=slurm_logs/%j_%x.err
 #SBATCH --export=ALL
-#SBATCH --time=1:00:00
+#SBATCH --time=4:00:00
 #SBATCH --gres=gpu:1
 #SBATCH --mem=32G
 #SBATCH --cpus-per-task=8
@@ -14,59 +14,158 @@
 # use `sbatch submit.slurm`
 # note we do not have WANDB_MODE=offline here because we are submitting the job to the cluster
 
-WANDB_MODE=offline \
-accelerate launch --config-file accelerate.yaml --mixed_precision=bf16 --num_processes=1 overfit.py \
---config-path config \
---config-name bpe.yaml \
-wandb.project="overfit-path" \
-wandb.exp_name="vanilla muon" \
-\
-train.batch_size=64 \
-train.global_batch_size=64 \
-\
-train.train_steps=400 \
-\
-optimizer.lr=1e-2 \
-optimizer.min_lr=1e-2 \
-train.grad_norm=1000000 \
-train.warmup_steps=0 \
-\
-model_type=transformer \
-transformer.block_size=512 \
-transformer.n_layer=6 \
-transformer.dim=256 \
-transformer.n_head=4 \
-transformer.use_fused_ops=True \
-optimizer.name=muon \
-optimizer.muon_momentum=0.95
+# WANDB_MODE=offline \
+# accelerate launch --config-file accelerate.yaml --mixed_precision=bf16 --num_processes=1 overfit.py \
+# --config-path config \
+# --config-name bpe.yaml \
+# wandb.project="overfit-path" \
+# wandb.exp_name="vanilla muon" \
+# \
+# train.batch_size=64 \
+# train.global_batch_size=64 \
+# \
+# train.train_steps=400 \
+# \
+# optimizer.lr=1e-2 \
+# optimizer.min_lr=1e-2 \
+# train.grad_norm=1000000 \
+# train.warmup_steps=0 \
+# \
+# model_type=transformer \
+# transformer.block_size=512 \
+# transformer.n_layer=6 \
+# transformer.dim=256 \
+# transformer.n_head=4 \
+# transformer.use_fused_ops=True \
+# optimizer.name=muon \
+# optimizer.muon_momentum=0.95
 
 
-WANDB_MODE=offline \
-accelerate launch --config-file accelerate.yaml --mixed_precision=bf16 --num_processes=1 overfit.py \
+# WANDB_MODE=offline \
+# accelerate launch --config-file accelerate.yaml --mixed_precision=bf16 --num_processes=1 overfit.py \
+# --config-path config \
+# --config-name bpe.yaml \
+# wandb.project="overfit-path" \
+# wandb.exp_name="1 _ p _ 0.01 muon" \
+# \
+# train.batch_size=64 \
+# train.global_batch_size=64 \
+# \
+# train.train_steps=400 \
+# \
+# optimizer.lr=1e-2 \
+# optimizer.min_lr=1e-2 \
+# train.grad_norm=1000000 \
+# train.warmup_steps=0 \
+# \
+# model_type=path_transformer \
+# path_transformer.block_size=512 \
+# path_transformer.n_layer=6 \
+# path_transformer.dim=256 \
+# path_transformer.n_head=4 \
+# path_transformer.use_fused_ops=True \
+# path_transformer.damping=0.01 \
+# optimizer.name=muon \
+# optimizer.muon_momentum=0.95
+
+# WANDB_MODE=offline \
+# accelerate launch --config-file accelerate.yaml --mixed_precision=bf16 --num_processes=1 train.py \
+# --config-path config \
+# --config-name bpe.yaml \
+# wandb.project="fineweb-1b" \
+# wandb.exp_name="vanilla 12L lr 1e-3 damp 1e-2 muon" \
+# \
+# train.batch_size=32 \
+# train.global_batch_size=256 \
+# \
+# train.train_steps=4000 \
+# train.warmup_steps=1000 \
+# eval.eval_interval=400 \
+# eval.eval_iters=100 \
+# \
+# train.grad_norm=1 \
+# optimizer.name=muon \
+# optimizer.lr=0.02 \
+# optimizer.min_lr=0.002 \
+# optimizer.adamw_lr_mul=0.1 \
+# optimizer.betas=[0.9,0.95] \
+# optimizer.weight_decay=0.0 \
+# optimizer.muon_weight_decay=0.0 \
+# optimizer.muon_momentum=0.95 \
+# optimizer.muon_nesterov=true \
+# optimizer.muon_ns_steps=5 \
+# \
+# model_type=transformer \
+# transformer.block_size=1024 \
+# transformer.n_layer=12 \
+# transformer.dim=768 \
+# transformer.n_head=12 \
+# transformer.use_fused_ops=True
+
+
+# WANDB_MODE=offline \
+# accelerate launch --config-file accelerate.yaml --mixed_precision=bf16 --num_processes=1 train.py \
+# --config-path config \
+# --config-name bpe.yaml \
+# wandb.project="fineweb-1b" \
+# wandb.exp_name="zero path 1_p_g_2 12L lr 1e-3 damp 1e-2 muon" \
+# \
+# train.batch_size=32 \
+# train.global_batch_size=256 \
+# \
+# train.train_steps=4000 \
+# train.warmup_steps=1000 \
+# eval.eval_interval=400 \
+# eval.eval_iters=100 \
+# \
+# train.grad_norm=1 \
+# optimizer.name=adamw \
+# optimizer.lr=0.02 \
+# optimizer.min_lr=0.002 \
+# optimizer.adamw_lr_mul=0.1 \
+# optimizer.betas=[0.9,0.95] \
+# optimizer.weight_decay=0.0 \
+# optimizer.muon_weight_decay=0.0 \
+# optimizer.muon_momentum=0.95 \
+# optimizer.muon_nesterov=true \
+# optimizer.muon_ns_steps=5 \
+# \
+# model_type=path_transformer \
+# path_transformer.block_size=1024 \
+# path_transformer.n_layer=12 \
+# path_transformer.dim=768 \
+# path_transformer.n_head=12 \
+# path_transformer.use_fused_ops=True \
+# path_transformer.damping=1e-2
+
+# WANDB_MODE=offline \
+accelerate launch --config-file accelerate.yaml --mixed_precision=bf16 --num_processes=1 train.py \
 --config-path config \
 --config-name bpe.yaml \
-wandb.project="overfit-path" \
-wandb.exp_name="1 _ p _ 0.01 muon" \
+wandb.project="fineweb-1b" \
+wandb.exp_name="zero path 1_p_g_2 12L lr 1e-3 damp 1e-2 adam" \
 \
-train.batch_size=64 \
-train.global_batch_size=64 \
+train.batch_size=32 \
+train.global_batch_size=256 \
 \
-train.train_steps=400 \
+train.train_steps=4000 \
+train.warmup_steps=1000 \
+eval.eval_interval=400 \
+eval.eval_iters=100 \
 \
+train.grad_norm=1 \
+optimizer.name=adamw \
 optimizer.lr=1e-2 \
-optimizer.min_lr=1e-2 \
-train.grad_norm=1000000 \
-train.warmup_steps=0 \
+optimizer.min_lr=1e-3 \
 \
 model_type=path_transformer \
-path_transformer.block_size=512 \
-path_transformer.n_layer=6 \
-path_transformer.dim=256 \
-path_transformer.n_head=4 \
+path_transformer.block_size=1024 \
+path_transformer.n_layer=12 \
+path_transformer.dim=768 \
+path_transformer.n_head=12 \
 path_transformer.use_fused_ops=True \
-path_transformer.damping=0.01 \
-optimizer.name=muon \
-optimizer.muon_momentum=0.95
+path_transformer.damping=1e-2
+
 
 echo "Run finished at: "
 date

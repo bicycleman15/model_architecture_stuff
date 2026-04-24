@@ -19,6 +19,7 @@ from accelerate.utils import DistributedDataParallelKwargs
 
 from models.utils import get_model
 from data_loader import ShardedDataLoader, TestDataset
+from muon import MuonWithAuxAdamW, build_muon_param_groups
 from utils import (
     CycleIterator,
     validate,
@@ -154,15 +155,42 @@ def main(cfg: DictConfig):
     accelerator.print("*****************************************************************")
 
     # optimizer
-    param_groups = group_params(model, weight_decay=cfg.optimizer.weight_decay)
-    accelerator.print(f"Optimizer param groups: {len(param_groups)}")
-    for i, pg in enumerate(param_groups):
-        n_params = sum(p.numel() for p in pg["params"])
-        accelerator.print(f"  group {i}: {n_params:,} params, lr_mult={pg.get('lr_multiplier', 1.0)}, wd={pg.get('weight_decay', cfg.optimizer.weight_decay)}")
-    optimizer = torch.optim.AdamW(
-        param_groups,
-        lr=cfg.optimizer.lr, betas=cfg.optimizer.betas,
-    )
+    opt_name = str(cfg.optimizer.get("name", "adamw")).lower()
+    if opt_name == "muon":
+        muon_lr = cfg.optimizer.lr
+        adamw_lr_mul = cfg.optimizer.get("adamw_lr_mul", 0.015)
+        adamw_lr = muon_lr * adamw_lr_mul
+        param_groups = build_muon_param_groups(
+            accelerator.unwrap_model(model) if hasattr(model, "module") else model,
+            muon_lr=muon_lr,
+            muon_weight_decay=cfg.optimizer.get("muon_weight_decay", 0.0),
+            muon_momentum=cfg.optimizer.get("muon_momentum", 0.95),
+            muon_nesterov=cfg.optimizer.get("muon_nesterov", True),
+            muon_ns_steps=cfg.optimizer.get("muon_ns_steps", 5),
+            adamw_lr=adamw_lr,
+            adamw_betas=tuple(cfg.optimizer.betas),
+            adamw_weight_decay=cfg.optimizer.weight_decay,
+        )
+        optimizer = MuonWithAuxAdamW(param_groups)
+        n_muon = sum(len(g["params"]) for g in param_groups if g["use_muon"])
+        n_adamw = sum(len(g["params"]) for g in param_groups if not g["use_muon"])
+        accelerator.print(
+            f"Muon optimizer: {n_muon} matrix params @ lr={muon_lr}, "
+            f"{n_adamw} aux params on AdamW @ lr={adamw_lr} (mul={adamw_lr_mul})"
+        )
+    else:
+        param_groups = group_params(model, weight_decay=cfg.optimizer.weight_decay)
+        accelerator.print(f"Optimizer param groups: {len(param_groups)}")
+        for i, pg in enumerate(param_groups):
+            n_params = sum(p.numel() for p in pg["params"])
+            accelerator.print(f"  group {i}: {n_params:,} params, lr_mult={pg.get('lr_multiplier', 1.0)}, wd={pg.get('weight_decay', cfg.optimizer.weight_decay)}")
+        optimizer = torch.optim.AdamW(
+            param_groups,
+            lr=cfg.optimizer.lr, betas=cfg.optimizer.betas,
+        )
+
+    for pg in optimizer.param_groups:
+        pg["base_lr"] = pg["lr"]
 
     model, optimizer = accelerator.prepare(model, optimizer)
     accelerator.unwrap_model(model).setup_cache(device=accelerator.device)
@@ -183,8 +211,9 @@ def main(cfg: DictConfig):
             optimizer.zero_grad()
 
         lr = get_lr(cfg.optimizer.lr, opt_step, warmup_steps, train_steps, cfg.optimizer.min_lr)
+        lr_scale = lr / cfg.optimizer.lr if cfg.optimizer.lr > 0 else 1.0
         for pg in optimizer.param_groups:
-            pg["lr"] = lr * pg.get("lr_multiplier", 1.0)
+            pg["lr"] = pg["base_lr"] * lr_scale * pg.get("lr_multiplier", 1.0)
 
         with accelerator.autocast():
             loss, stats = model(input_ids, labels=targets)
@@ -192,8 +221,11 @@ def main(cfg: DictConfig):
         accelerator.backward(loss / grad_accum)
 
         if (it + 1) % grad_accum == 0:
-            if cfg.train.grad_norm > 0:
-                accelerator.clip_grad_norm_(model.parameters(), cfg.train.grad_norm)
+            grad_norm = accelerator.clip_grad_norm_(
+                model.parameters(),
+                cfg.train.grad_norm if cfg.train.grad_norm > 0 else float("inf"),
+            )
+            grad_norm_val = grad_norm.item() if torch.is_tensor(grad_norm) else float(grad_norm)
             optimizer.step()
             opt_step += 1
 
@@ -210,9 +242,14 @@ def main(cfg: DictConfig):
                     "train/loss": loss.item(),
                     "train/bpb": train_bpb,
                     "train/lr": lr,
+                    "train/grad_norm": grad_norm_val,
                     "train/step": opt_step,
                     "perf/Ktokens_s": token_throughput,
                 }
+                if opt_name == "muon":
+                    for pg in optimizer.param_groups:
+                        tag = "muon" if pg.get("use_muon", False) else "adamw"
+                        log_dict[f"train/lr_{tag}"] = pg["lr"]
                 for k, v in stats.items():
                     log_dict[f"stat/{k}"] = v
                 wandb.log(log_dict)
@@ -221,7 +258,7 @@ def main(cfg: DictConfig):
             _ce = stats.get("reinforce/ce_loss", stats.get("hnet/ce_loss", loss.item()))
             _bpb = _ce * targets.numel() / _num_bytes / math.log(2) if _num_bytes > 0 else 0.0
             stats_str = " ".join(f"{k}={v:.2f}" for k, v in sorted(stats.items()))
-            bar.set_postfix_str(f"loss={loss.item():.4f} bpb={_bpb:.4f} lr={lr:.6f} step={opt_step} {stats_str}")
+            bar.set_postfix_str(f"loss={loss.item():.4f} bpb={_bpb:.4f} lr={lr:.6f} gnorm={grad_norm_val:.3f} step={opt_step} {stats_str}")
 
         # eval (on optimizer steps)
         if opt_step > 0 and opt_step % cfg.eval.eval_interval == 0 and (it + 1) % grad_accum == 0:
