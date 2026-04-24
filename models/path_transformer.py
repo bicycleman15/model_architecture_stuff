@@ -36,7 +36,7 @@ class PathPreservingAutograd(torch.autograd.Function):
         # max_p = torch.max(p, dim=-1, keepdim=True).values
         # min_p = torch.min(p, dim=-1, keepdim=True).values
 
-        factor = 1 / (p + 0.01)
+        factor = 1 / (p + ctx.damping)
         # factor = (1 - p)
         # factor = (1 - max_p) * min_p / (p + 0.1)
         # factor = (1 - max_p) / (p + 0.1)
