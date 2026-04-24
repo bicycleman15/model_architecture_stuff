@@ -13,10 +13,15 @@ from torch.nn import functional as F
 
 from models.transformer import Transformer as _BaseTransformer
 
+import einops
+
 
 class PathPreservingAutograd(torch.autograd.Function):
     @staticmethod
     def forward(ctx, theta, damping):
+        
+        theta[..., -1] = 0
+
         ctx.save_for_backward(theta)
         ctx.damping = damping
         return theta.clone()
@@ -26,10 +31,30 @@ class PathPreservingAutograd(torch.autograd.Function):
         theta, = ctx.saved_tensors
         grad_input = grad_output.clone()
 
-        probs = F.softmax(theta, dim=-1)
+        p = F.softmax(theta, dim=-1)
 
-        modified_grad = grad_input / (probs + ctx.damping)
-        modified_grad = modified_grad - modified_grad.mean(dim=-1, keepdim=True)
+        # max_p = torch.max(p, dim=-1, keepdim=True).values
+        # min_p = torch.min(p, dim=-1, keepdim=True).values
+
+        factor = 1 / (p + 0.01)
+        # factor = (1 - p)
+        # factor = (1 - max_p) * min_p / (p + 0.1)
+        # factor = (1 - max_p) / (p + 0.1)
+        # factor = 1
+        
+        # factor = 1.0 / (p * (1.0 - p) + ctx.damping)
+
+        # factor = 1
+        modified_grad = grad_input * factor
+
+        # breakpoint()
+
+        modified_grad -= einops.repeat(modified_grad[..., -1:], "... 1 -> ... v", v=modified_grad.shape[-1])
+
+        #modified_grad[..., -1] = 0
+
+        # modified_grad = modified_grad - modified_grad.mean(dim=-1, keepdim=True)
+        # [B, L, V]
 
         return modified_grad, None
 

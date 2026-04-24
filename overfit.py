@@ -54,18 +54,120 @@ def main(cfg: DictConfig):
         print(f"Warmup steps ({cfg.train.warmup_steps_percentage} * {overfit_steps}): {warmup_steps}")
 
     # --- data: grab grad_accum micro-batches that form one global batch ---
-    loader = ShardedDataLoader(
-        data_root=cfg.dataset.path,
-        block_size=cfg.model.block_size,
-        batch_size=cfg.train.batch_size,
-        split="train",
-    )
-    loader_iter = iter(loader)
-    micro_batches = []
-    for _ in range(grad_accum):
-        xi, yi = next(loader_iter)
-        micro_batches.append((xi.to(device), yi.to(device)))
-    print(f"Loaded {grad_accum} micro-batches, each shape: x={list(micro_batches[0][0].shape)}, y={list(micro_batches[0][1].shape)}")
+    # `train.random_ids` replaces real tokens with uniform random ids drawn
+    # from the tokenizer vocab. With enough positions this makes collisions
+    # astronomically unlikely, so the theoretical loss floor is ~0 and any
+    # residual loss is purely an optimization/model-capacity issue.
+    use_random_ids = bool(cfg.train.get("random_ids", False))
+    if use_random_ids:
+        vocab_size = int(cfg.dataset.vocab_size)
+        # Fixed seed (independent of cfg.seed) so the random batch is identical
+        # across runs / sweeps. This lets us compare optimizers, model variants,
+        # etc. on the exact same memorization target.
+        RANDOM_IDS_SEED = 0
+        g = torch.Generator(device="cpu").manual_seed(RANDOM_IDS_SEED)
+        micro_batches = []
+        # Need block_size + 1 tokens per row so that (x, y) are aligned shifts,
+        # matching the real loader's layout.
+        for _ in range(grad_accum):
+            buf = torch.randint(
+                low=0, high=vocab_size,
+                size=(batch_size, block_size + 1),
+                generator=g, dtype=torch.long,
+            )
+            xi = buf[:, :-1].contiguous()
+            yi = buf[:, 1:].contiguous()
+            micro_batches.append((xi.to(device), yi.to(device)))
+        print(f"[Data] Using RANDOM ids (vocab={vocab_size}), "
+              f"{grad_accum} micro-batches, each shape: "
+              f"x={list(micro_batches[0][0].shape)}, y={list(micro_batches[0][1].shape)}")
+    else:
+        loader = ShardedDataLoader(
+            data_root=cfg.dataset.path,
+            block_size=cfg.model.block_size,
+            batch_size=cfg.train.batch_size,
+            split="train",
+        )
+        loader_iter = iter(loader)
+        micro_batches = []
+        for _ in range(grad_accum):
+            xi, yi = next(loader_iter)
+            micro_batches.append((xi.to(device), yi.to(device)))
+        print(f"Loaded {grad_accum} micro-batches, each shape: x={list(micro_batches[0][0].shape)}, y={list(micro_batches[0][1].shape)}")
+
+    # --- collision sanity check ---
+    # For a token at position t in a sample, the model's prediction is a
+    # deterministic function of the prefix (x_0, ..., x_t). If two prefixes are
+    # identical across the batch but their targets differ, cross-entropy has a
+    # strictly positive floor equal to the entropy of the collision distribution.
+    # This is especially severe when block_size=1 (pure bigram task).
+    from collections import defaultdict
+    import math as _math
+
+    prefix_to_targets = defaultdict(list)
+    total_positions = 0
+    for xi, yi in micro_batches:
+        # xi, yi: (B, T)
+        xi_cpu = xi.detach().cpu().tolist()
+        yi_cpu = yi.detach().cpu().tolist()
+        for b in range(len(xi_cpu)):
+            for t in range(len(xi_cpu[b])):
+                prefix = tuple(xi_cpu[b][: t + 1])
+                prefix_to_targets[prefix].append(yi_cpu[b][t])
+                total_positions += 1
+
+    n_unique_prefixes = len(prefix_to_targets)
+    colliding_prefixes = {p: ts for p, ts in prefix_to_targets.items() if len(set(ts)) > 1}
+    n_colliding_positions = sum(len(ts) for ts in colliding_prefixes.values())
+
+    irreducible_nats = 0.0
+    for ts in prefix_to_targets.values():
+        if len(set(ts)) == 1:
+            continue
+        counts = defaultdict(int)
+        for t in ts:
+            counts[t] += 1
+        n = len(ts)
+        h = -sum((c / n) * _math.log(c / n) for c in counts.values())
+        irreducible_nats += h * n
+    loss_floor = irreducible_nats / max(total_positions, 1)
+
+    print(f"[SanityCheck] positions={total_positions} | unique prefixes={n_unique_prefixes}")
+    print(f"[SanityCheck] prefixes with conflicting targets: {len(colliding_prefixes)} "
+          f"({n_colliding_positions} positions, "
+          f"{100.0 * n_colliding_positions / max(total_positions, 1):.1f}%)")
+    print(f"[SanityCheck] theoretical loss floor (mean CE): {loss_floor:.6f}")
+    if loss_floor > 1e-6:
+        print(f"[SanityCheck] WARNING: loss cannot go below ~{loss_floor:.4f} on this batch. "
+              f"Increase block_size or use a disambiguating feature to enable true overfit.")
+
+    # --- show colliding (prefix -> targets) pairs ---
+    if len(colliding_prefixes) > 0:
+        try:
+            from transformers import AutoTokenizer
+            _tok = AutoTokenizer.from_pretrained(cfg.dataset.tokenizer_name)
+            def _decode(ids):
+                return _tok.decode(list(ids))
+        except Exception as _e:
+            print(f"[SanityCheck] (tokenizer unavailable: {_e}; showing raw ids)")
+            _decode = None
+
+        max_show = int(cfg.get("overfit_show_collisions", 20))
+        ranked = sorted(colliding_prefixes.items(), key=lambda kv: -len(kv[1]))
+        print(f"[SanityCheck] showing top {min(max_show, len(ranked))} colliding prefixes "
+              f"(prefix -> target counts):")
+        for prefix, targets in ranked[:max_show]:
+            counts = defaultdict(int)
+            for t in targets:
+                counts[t] += 1
+            tgt_items = sorted(counts.items(), key=lambda kv: -kv[1])
+            if _decode is not None:
+                prefix_str = repr(_decode(prefix))
+                tgt_str = ", ".join(f"{repr(_decode([tid]))}x{c}" for tid, c in tgt_items)
+            else:
+                prefix_str = str(list(prefix))
+                tgt_str = ", ".join(f"{tid}x{c}" for tid, c in tgt_items)
+            print(f"  {prefix_str}  ->  {{{tgt_str}}}  (n={len(targets)})")
 
     # --- model ---
     model_config, model = get_model(cfg)
@@ -90,8 +192,9 @@ def main(cfg: DictConfig):
     # --- optimizer ---
     opt_name = str(cfg.optimizer.get("name", "adamw")).lower()
     if opt_name == "muon":
-        muon_lr = cfg.optimizer.get("muon_lr", cfg.optimizer.lr)
-        adamw_lr = cfg.optimizer.get("adamw_lr", cfg.optimizer.lr)
+        muon_lr = cfg.optimizer.lr
+        adamw_lr_mul = cfg.optimizer.get("adamw_lr_mul", 0.015)
+        adamw_lr = muon_lr * adamw_lr_mul
         param_groups = build_muon_param_groups(
             model,
             muon_lr=muon_lr,
@@ -107,7 +210,7 @@ def main(cfg: DictConfig):
         n_muon = sum(len(g["params"]) for g in param_groups if g["use_muon"])
         n_adamw = sum(len(g["params"]) for g in param_groups if not g["use_muon"])
         print(f"Muon optimizer: {n_muon} matrix params @ lr={muon_lr}, "
-              f"{n_adamw} aux params on AdamW @ lr={adamw_lr}")
+              f"{n_adamw} aux params on AdamW @ lr={adamw_lr} (mul={adamw_lr_mul})")
     elif opt_name == "sgd":
         optimizer = torch.optim.SGD(
             [p for p in model.parameters() if p.requires_grad],
@@ -136,7 +239,15 @@ def main(cfg: DictConfig):
         if it % grad_accum == 0:
             optimizer.zero_grad()
 
-        lr = get_lr(cfg.optimizer.lr, opt_step, warmup_steps, overfit_steps, cfg.optimizer.min_lr)
+        # linear warmup then linear decay to min_lr
+        if opt_step < warmup_steps:
+            lr = cfg.optimizer.lr * opt_step / max(warmup_steps, 1)
+        elif opt_step >= overfit_steps:
+            lr = cfg.optimizer.min_lr
+        else:
+            decay_ratio = (opt_step - warmup_steps) / max(overfit_steps - warmup_steps, 1)
+            lr = cfg.optimizer.lr +  decay_ratio * 1 * (cfg.optimizer.min_lr - cfg.optimizer.lr)
+
         lr_scale = lr / cfg.optimizer.lr if cfg.optimizer.lr > 0 else 1.0
         for pg in optimizer.param_groups:
             pg["lr"] = pg["base_lr"] * lr_scale
@@ -169,6 +280,10 @@ def main(cfg: DictConfig):
                     "train/step": opt_step,
                     "perf/step_ms": dt * 1000,
                 }
+                if opt_name == "muon":
+                    for pg in optimizer.param_groups:
+                        tag = "muon" if pg.get("use_muon", False) else "adamw"
+                        log_dict[f"train/lr_{tag}"] = pg["lr"]
                 for k, v in stats.items():
                     log_dict[f"stat/{k}"] = v
                 wandb.log(log_dict)

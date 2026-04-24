@@ -55,6 +55,13 @@ train:
 
     norm_eps: 0.00001
 
+    # ----- overfit.py only -----
+    # If true, replace real tokens with uniform random ids drawn from
+    # [0, dataset.vocab_size). Useful as a sanity check: with random ids the
+    # theoretical loss floor is ~0, so any residual loss is an
+    # optimization / model-capacity issue, not a data collision issue.
+    random_ids: True
+
 # Evaluation-related arguments.
 eval:
 
@@ -87,19 +94,17 @@ optimizer:
     momentum: 0.9
 
     # ----- Muon-only (name=muon) -----
-    # LR for the Muon (Newton-Schulz orthogonalized) matrix params
-    muon_lr: 0.02
-    # Decoupled weight decay for Muon params (usually 0)
-    muon_weight_decay: 0.0
+    # The Muon (matrix) group uses `optimizer.lr` above as its base LR.
+    # The aux AdamW group (embed/head/norm/bias) uses `optimizer.lr * adamw_lr_mul`.
+    # Classical guidance: AdamW-side LR should be ~3x to ~60x smaller than Muon LR
+    # (e.g. Muon 2e-2 + AdamW 2e-3  =>  adamw_lr_mul = 0.1).
+    adamw_lr_mul: 0.1
     # SGD-style momentum coefficient inside Muon
     muon_momentum: 0.95
     # Use Nesterov-style lookahead momentum
     muon_nesterov: True
     # Number of Newton-Schulz iterations per step (5 is canonical)
     muon_ns_steps: 5
-    # LR for the aux AdamW group (embeddings / lm_head / norms / biases)
-    # Classical guidance is ~10x smaller than muon_lr
-    adamw_lr: 2e-3
 
 # results directory
 # don't change this, it will be set by the script
