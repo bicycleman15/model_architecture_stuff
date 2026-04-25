@@ -4,7 +4,7 @@
 #SBATCH --output=slurm_logs/%j_%x.out
 #SBATCH --error=slurm_logs/%j_%x.err
 #SBATCH --export=ALL
-#SBATCH --time=4:00:00
+#SBATCH --time=8:00:00
 #SBATCH --gres=gpu:1
 #SBATCH --mem=32G
 #SBATCH --cpus-per-task=8
@@ -73,7 +73,7 @@
 # --config-path config \
 # --config-name bpe.yaml \
 # wandb.project="fineweb-1b" \
-# wandb.exp_name="vanilla 12L lr 1e-3 damp 1e-2 muon" \
+# wandb.exp_name="no_clip vanilla 12L lr 2e-2 muon" \
 # \
 # train.batch_size=32 \
 # train.global_batch_size=256 \
@@ -83,7 +83,7 @@
 # eval.eval_interval=400 \
 # eval.eval_iters=100 \
 # \
-# train.grad_norm=1 \
+# train.grad_norm=10000 \
 # optimizer.name=muon \
 # optimizer.lr=0.02 \
 # optimizer.min_lr=0.002 \
@@ -108,7 +108,7 @@
 # --config-path config \
 # --config-name bpe.yaml \
 # wandb.project="fineweb-1b" \
-# wandb.exp_name="zero path 1_p_g_2 12L lr 1e-3 damp 1e-2 muon" \
+# wandb.exp_name="no_clip zero path 1_p_g_2 12L lr 2e-2 damp 1e-2 muon" \
 # \
 # train.batch_size=32 \
 # train.global_batch_size=256 \
@@ -118,8 +118,8 @@
 # eval.eval_interval=400 \
 # eval.eval_iters=100 \
 # \
-# train.grad_norm=1 \
-# optimizer.name=adamw \
+# train.grad_norm=10000 \
+# optimizer.name=muon \
 # optimizer.lr=0.02 \
 # optimizer.min_lr=0.002 \
 # optimizer.adamw_lr_mul=0.1 \
@@ -139,11 +139,38 @@
 # path_transformer.damping=1e-2
 
 # WANDB_MODE=offline \
+# accelerate launch --config-file accelerate.yaml --mixed_precision=bf16 --num_processes=1 train.py \
+# --config-path config \
+# --config-name bpe.yaml \
+# wandb.project="fineweb-1b" \
+# wandb.exp_name="no_clip path 1_p_g_2 12L lr 1e-3 damp 1e-2 adam" \
+# \
+# train.batch_size=32 \
+# train.global_batch_size=256 \
+# \
+# train.train_steps=4000 \
+# train.warmup_steps=1000 \
+# eval.eval_interval=400 \
+# eval.eval_iters=100 \
+# \
+# train.grad_norm=10000 \
+# optimizer.name=adamw \
+# optimizer.lr=1e-3 \
+# optimizer.min_lr=1e-4 \
+# \
+# model_type=path_transformer \
+# path_transformer.block_size=1024 \
+# path_transformer.n_layer=12 \
+# path_transformer.dim=768 \
+# path_transformer.n_head=12 \
+# path_transformer.use_fused_ops=True \
+# path_transformer.damping=1e-2
+
 accelerate launch --config-file accelerate.yaml --mixed_precision=bf16 --num_processes=1 train.py \
 --config-path config \
 --config-name bpe.yaml \
 wandb.project="fineweb-1b" \
-wandb.exp_name="zero path 1_p_g_2 12L lr 1e-3 damp 1e-2 adam" \
+wandb.exp_name="no_clip vanilla 12L lr 1e-3 adam" \
 \
 train.batch_size=32 \
 train.global_batch_size=256 \
@@ -153,18 +180,17 @@ train.warmup_steps=1000 \
 eval.eval_interval=400 \
 eval.eval_iters=100 \
 \
-train.grad_norm=1 \
+train.grad_norm=10000 \
 optimizer.name=adamw \
-optimizer.lr=1e-2 \
-optimizer.min_lr=1e-3 \
+optimizer.lr=1e-3 \
+optimizer.min_lr=1e-4 \
 \
-model_type=path_transformer \
-path_transformer.block_size=1024 \
-path_transformer.n_layer=12 \
-path_transformer.dim=768 \
-path_transformer.n_head=12 \
-path_transformer.use_fused_ops=True \
-path_transformer.damping=1e-2
+model_type=transformer \
+transformer.block_size=1024 \
+transformer.n_layer=12 \
+transformer.dim=768 \
+transformer.n_head=12 \
+transformer.use_fused_ops=True
 
 
 echo "Run finished at: "
