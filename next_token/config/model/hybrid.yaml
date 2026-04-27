@@ -1,0 +1,28 @@
+# Hybrid: alternates GatedDeltaNet and Transformer attention blocks.
+# Default pattern (n_layer=6, pattern_start_with=deltanet):
+#   [DN, Attn, DN, Attn, DN, Attn]
+name: hybrid
+dim: 384
+n_layer: 12
+pattern_start_with: deltanet   # or "attention" to flip the alternation
+
+# TransformerBlock sub-layer (workspace models/transformer.py)
+attn:
+  n_head: 6
+  use_qk_norm: false
+
+# GatedDeltaNet sub-layer (fla.layers.GatedDeltaNet).
+# With use_gate=true the kernel requires num_heads * head_dim == 0.75 * dim.
+# 6 * 48 = 288 = 0.75 * 384  ->  satisfied.
+deltanet:
+  num_heads: 6
+  head_dim: 48
+  expand_v: 2
+  use_short_conv: true
+  use_gate: true
+  conv_size: 4
+
+initializer_range: 0.02
+norm_eps: 1.0e-5
+use_fused_ops: true
+rope_base: 10000

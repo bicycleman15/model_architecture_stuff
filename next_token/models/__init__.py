@@ -16,4 +16,9 @@ def get_model(cfg: DictConfig, vocab_size: int, block_size: int):
 
         return build_transformer(vocab_size=vocab_size, block_size=block_size, mcfg=cfg.model)
 
+    if name == "hybrid":
+        from next_token.models.hybrid import build_hybrid
+
+        return build_hybrid(vocab_size=vocab_size, block_size=block_size, mcfg=cfg.model)
+
     raise ValueError(f"unknown model: {name!r}")
