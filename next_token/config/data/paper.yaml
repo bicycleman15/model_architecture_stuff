@@ -1,0 +1,6 @@
+# Paper defaults: deg=5, path=5, num_nodes=50, 200k train / 20k test
+deg: 5
+path_len: 5
+num_nodes: 50
+n_train: 200000
+n_test: 20000

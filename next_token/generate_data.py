@@ -9,14 +9,14 @@ config (``data.dir`` defaults to ``next_token/data``).
 
 Usage::
 
-    python -m next_token.generate_data --deg=2 --path_len=5 --num_nodes=50 \\
+    python -m next_token.generate_data --deg=5 --path_len=5 --num_nodes=50 \
         --n_train=200000 --n_test=20000
 
-    python -m next_token.generate_data --deg=2 --path_len=5 --num_nodes=20 \\
+    python -m next_token.generate_data --deg=2 --path_len=5 --num_nodes=20 \
         --n_train=20000 --n_test=2000
 
     # reverse-encoded targets (Bachmann & Nagarajan §5)
-    python -m next_token.generate_data --deg=2 --path_len=5 --num_nodes=50 \\
+    python -m next_token.generate_data --deg=5 --path_len=5 --num_nodes=50 \
         --n_train=200000 --n_test=20000 --reverse=True
 """
 

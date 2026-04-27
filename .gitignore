@@ -213,6 +213,8 @@ __marimo__/
 data/
 !state_tracking/config/data/
 !state_tracking/config/data/**
+!next_token/config/data/
+!next_token/config/data/**
 
 wandb/
 checkpoints/

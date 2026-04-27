@@ -352,16 +352,82 @@ def main(cfg: DictConfig) -> None:
     global_step = 0
     best_seq_acc = -1.0
 
+    # Eval cadence: every `eval.every_pct` of total_steps (default 10%).
+    eval_every_pct = float(cfg.eval.get("every_pct", 0.1))
+    eval_interval = max(1, int(round(total_steps * eval_every_pct)))
+    if accelerator.is_main_process:
+        log.info(
+            f"Eval cadence: every {eval_interval} steps "
+            f"({eval_every_pct * 100:.1f}% of {total_steps} total)"
+        )
+
+    # Rolling-window train loss accumulated since the last eval.
+    window_loss = 0.0
+    window_count = 0
+
+    def run_eval(step: int, epoch: int):
+        nonlocal best_seq_acc
+        forced = _eval_teacher_forced(
+            model,
+            test_loader,
+            accelerator,
+            target_len=target_len,
+            max_batches=cfg.eval.get("max_batches", None),
+        )
+        metrics = dict(forced)
+        if cfg.eval.get("free_generation", True):
+            gen = _eval_free_generation(
+                model,
+                test_loader,
+                accelerator,
+                prefix_len=prefix_len,
+                target_len=target_len,
+                teacherless=cfg.data.teacherless,
+                dummy_id=tokenizer.DUMMY,
+                max_batches=cfg.eval.get("max_batches", None),
+            )
+            metrics.update(gen)
+        mean_window_loss = window_loss / max(1, window_count)
+        metrics["train/window_loss"] = mean_window_loss
+
+        if accelerator.is_main_process:
+            # tok0 (source, trivial), tok1 (first hop, the hard one),
+            # tok_{T-2} (second-last), tok_{T-1} (goal, trivial).
+            report_idx = sorted({0, 1, target_len - 2, target_len - 1})
+            forced_str = " ".join(
+                f"forced_t{j}={metrics.get(f'val/forced_token_{j}', float('nan')):.3f}"
+                for j in report_idx
+            )
+            gen_str = " ".join(
+                f"gen_t{j}={metrics.get(f'val/gen_token_{j}', float('nan')):.3f}"
+                for j in report_idx
+            )
+            log.info(
+                f"step {step}/{total_steps} (ep {epoch}): "
+                f"train_loss={mean_window_loss:.4f} "
+                f"forced_seq={metrics.get('val/forced_seq_acc', float('nan')):.4f} "
+                f"{forced_str} "
+                f"gen_seq={metrics.get('val/gen_seq_acc', float('nan')):.4f} "
+                f"{gen_str}"
+            )
+            if cfg.logging.wandb:
+                wandb.log(metrics, step=step)
+
+        cur_seq_acc = metrics.get("val/gen_seq_acc", metrics.get("val/forced_seq_acc", 0.0))
+        if cur_seq_acc > best_seq_acc:
+            best_seq_acc = cur_seq_acc
+            if cfg.checkpoint.save_on_improve:
+                _save_checkpoint(accelerator, model, cfg, tag="best")
+
+        model.train()  # _eval_* set model.eval(); restore train mode
+
     bar = tqdm(
         total=total_steps,
         desc="train",
         disable=not accelerator.is_main_process,
     )
+    model.train()
     for epoch in range(cfg.schedule.epochs):
-        model.train()
-        epoch_loss = 0.0
-        n_batches = 0
-
         for input_ids, labels in train_loader:
             global_step += 1
             optimizer.zero_grad()
@@ -374,8 +440,8 @@ def main(cfg: DictConfig) -> None:
             optimizer.step()
             scheduler.step()
 
-            epoch_loss += loss.item()
-            n_batches += 1
+            window_loss += loss.item()
+            window_count += 1
             bar.update(1)
             bar.set_postfix(
                 loss=f"{loss.item():.4f}",
@@ -396,62 +462,12 @@ def main(cfg: DictConfig) -> None:
                     step=global_step,
                 )
 
-        mean_train_loss = epoch_loss / max(1, n_batches)
-
-        # -----------------------------------------------------------------
-        # Eval
-        # -----------------------------------------------------------------
-        is_last = epoch == cfg.schedule.epochs - 1
-        if (epoch + 1) % cfg.eval.every_n_epochs == 0 or is_last:
-            forced = _eval_teacher_forced(
-                model,
-                test_loader,
-                accelerator,
-                target_len=target_len,
-                max_batches=cfg.eval.get("max_batches", None),
-            )
-            metrics = dict(forced)
-            if cfg.eval.get("free_generation", True):
-                gen = _eval_free_generation(
-                    model,
-                    test_loader,
-                    accelerator,
-                    prefix_len=prefix_len,
-                    target_len=target_len,
-                    teacherless=cfg.data.teacherless,
-                    dummy_id=tokenizer.DUMMY,
-                    max_batches=cfg.eval.get("max_batches", None),
-                )
-                metrics.update(gen)
-            metrics["train/epoch_loss"] = mean_train_loss
-
-            if accelerator.is_main_process:
-                # tok0 (source, trivial), tok1 (first hop, the hard one),
-                # tok_{T-2} (second-last), tok_{T-1} (goal, trivial).
-                report_idx = sorted({0, 1, target_len - 2, target_len - 1})
-                forced_str = " ".join(
-                    f"forced_t{j}={metrics.get(f'val/forced_token_{j}', float('nan')):.3f}"
-                    for j in report_idx
-                )
-                gen_str = " ".join(
-                    f"gen_t{j}={metrics.get(f'val/gen_token_{j}', float('nan')):.3f}"
-                    for j in report_idx
-                )
-                log.info(
-                    f"epoch {epoch}: train_loss={mean_train_loss:.4f} "
-                    f"forced_seq={metrics.get('val/forced_seq_acc', float('nan')):.4f} "
-                    f"{forced_str} "
-                    f"gen_seq={metrics.get('val/gen_seq_acc', float('nan')):.4f} "
-                    f"{gen_str}"
-                )
-                if cfg.logging.wandb:
-                    wandb.log(metrics, step=global_step)
-
-            cur_seq_acc = metrics.get("val/gen_seq_acc", metrics.get("val/forced_seq_acc", 0.0))
-            if cur_seq_acc > best_seq_acc:
-                best_seq_acc = cur_seq_acc
-                if cfg.checkpoint.save_on_improve:
-                    _save_checkpoint(accelerator, model, cfg, tag="best")
+            # Step-based eval
+            is_last_step = global_step == total_steps
+            if global_step % eval_interval == 0 or is_last_step:
+                run_eval(step=global_step, epoch=epoch)
+                window_loss = 0.0
+                window_count = 0
 
     bar.close()
 

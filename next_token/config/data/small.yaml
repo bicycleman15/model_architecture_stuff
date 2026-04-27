@@ -1,0 +1,6 @@
+# Smaller config for fast smoke tests / debugging
+deg: 2
+path_len: 5
+num_nodes: 20
+n_train: 20000
+n_test: 2000

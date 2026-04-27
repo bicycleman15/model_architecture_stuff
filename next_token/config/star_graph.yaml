@@ -20,9 +20,9 @@ data:
   data_dir: next_token/data
 
 optimizer:
-  lr: 1.0e-4
+  lr: 1e-4
   betas: [0.9, 0.95]
-  eps: 1.0e-8
+  eps: 1e-8
   weight_decay: 0.0
   grad_clip: 1.0
 
@@ -34,7 +34,7 @@ schedule:
 mixed_precision: bf16
 
 eval:
-  every_n_epochs: 5
+  every_pct: 0.1          # run eval every X% of total training steps
   free_generation: true   # also run greedy autoregressive eval
   max_batches: null       # cap eval batches (null = full test set)
 

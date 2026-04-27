@@ -10,10 +10,9 @@ WANDB_MODE=offline accelerate launch --config-file accelerate.yaml \
 WANDB_MODE=offline \
 accelerate launch --config-file accelerate.yaml --mixed_precision=bf16 --num_processes=1 \
 -m next_token.train \
-data=small \
-schedule.epochs=10 \
-eval.every_n_epochs=5 \
-data.reverse=true
+data=paper \
+schedule.epochs=5 \
+data.reverse=false
 
 # ablations
 ... data.reverse=true
