@@ -4,7 +4,7 @@
 #SBATCH --output=slurm_logs/%j_%x.out
 #SBATCH --error=slurm_logs/%j_%x.err
 #SBATCH --export=ALL
-#SBATCH --time=8:00:00
+#SBATCH --time=2:00:00
 #SBATCH --gres=gpu:1
 #SBATCH --mem=32G
 #SBATCH --cpus-per-task=8
@@ -13,6 +13,34 @@
 # first activate the environment and then submit the job from the terminal :)
 # use `sbatch submit.slurm`
 # note we do not have WANDB_MODE=offline here because we are submitting the job to the cluster
+
+accelerate launch \
+--config-file accelerate.yaml --mixed_precision=bf16 --num_processes=1 \
+-m next_token.train \
+logging.project="learnability-star-graph" \
+logging.name="hybrid" \
+data=paper \
+data.num_nodes=100 \
+\
+model=hybrid \
+model.n_layer=12 \
+model.n_head=6 \
+model.dim=384 \
+\
+batch_size=512 \
+optimizer.lr=5e-4 \
+optimizer.min_lr=5e-5 \
+optimizer.weight_decay=0.1 \
+schedule.epochs=50
+
+#  \
+# \
+# nextlat.enabled=true \
+# nextlat.lambda_h=1.0 \
+# nextlat.lambda_kl=1.0 \
+# nextlat.n_hidden_layers=3 \
+# nextlat.hidden_mult=1
+
 
 # WANDB_MODE=offline \
 # accelerate launch --config-file accelerate.yaml --mixed_precision=bf16 --num_processes=1 overfit.py \
@@ -166,31 +194,31 @@
 # path_transformer.use_fused_ops=True \
 # path_transformer.damping=1e-2
 
-accelerate launch --config-file accelerate.yaml --mixed_precision=bf16 --num_processes=1 train.py \
---config-path config \
---config-name bpe.yaml \
-wandb.project="fineweb-1b" \
-wandb.exp_name="no_clip vanilla 12L lr 1e-3 adam" \
-\
-train.batch_size=32 \
-train.global_batch_size=256 \
-\
-train.train_steps=4000 \
-train.warmup_steps=1000 \
-eval.eval_interval=400 \
-eval.eval_iters=100 \
-\
-train.grad_norm=10000 \
-optimizer.name=adamw \
-optimizer.lr=1e-3 \
-optimizer.min_lr=1e-4 \
-\
-model_type=transformer \
-transformer.block_size=1024 \
-transformer.n_layer=12 \
-transformer.dim=768 \
-transformer.n_head=12 \
-transformer.use_fused_ops=True
+# accelerate launch --config-file accelerate.yaml --mixed_precision=bf16 --num_processes=1 train.py \
+# --config-path config \
+# --config-name bpe.yaml \
+# wandb.project="fineweb-1b" \
+# wandb.exp_name="no_clip vanilla 12L lr 1e-3 adam" \
+# \
+# train.batch_size=32 \
+# train.global_batch_size=256 \
+# \
+# train.train_steps=4000 \
+# train.warmup_steps=1000 \
+# eval.eval_interval=400 \
+# eval.eval_iters=100 \
+# \
+# train.grad_norm=10000 \
+# optimizer.name=adamw \
+# optimizer.lr=1e-3 \
+# optimizer.min_lr=1e-4 \
+# \
+# model_type=transformer \
+# transformer.block_size=1024 \
+# transformer.n_layer=12 \
+# transformer.dim=768 \
+# transformer.n_head=12 \
+# transformer.use_fused_ops=True
 
 
 echo "Run finished at: "

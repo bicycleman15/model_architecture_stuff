@@ -7,7 +7,6 @@ defaults:
 #   https://github.com/gregorbachmann/Next-Token-Failures
 # (deg=2, path=5, num_nodes=50, 6L/384D/6H, batch=256, lr=1e-4, AdamW)
 seed: 42
-project_name: next_token_star_graph
 batch_size: 256
 
 # Train objective knobs (orthogonal to the data file we load).
@@ -41,12 +40,29 @@ eval:
 
 logging:
   wandb: true
-  entity: null
+  entity: "bicycleman15"
+  project: next_token_star_graph
+  name: ""                # optional tag prepended to the auto-built run name
+                          # (e.g. logging.name=ablation_X -> "ablation_X <auto>")
 
 checkpoint:
   save_dir: checkpoints
   save_on_improve: false   # disable best-checkpoint saving
   save_final: false        # disable final-checkpoint saving
+
+# NextLat auxiliary objective (https://arxiv.org/abs/2511.05963).
+# Wraps the base model with a residual-MLP latent dynamics model and adds
+#   L_next + lambda_h * L_next_h + lambda_kl * L_kl
+# during training; inference is unchanged.
+nextlat:
+  enabled: false
+  horizon: null            # null -> auto: max(1, path_len - 2) (paper Sec 4.3)
+  lambda_h: 1.0
+  lambda_kl: 1.0
+  n_hidden_layers: 2       # SiLU MLP depth in the dynamics model
+  hidden_mult: 4           # hidden width = hidden_mult * dim
+  stop_grad_target: true   # detach target hidden states (Algorithm 1's sg(.))
+  mask_kl: true            # average KL only over non-(-100) label positions
 
 hydra:
   run:

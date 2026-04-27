@@ -182,8 +182,11 @@ def _eval_free_generation(
             break
 
         # Recover the full sequence: input_ids = full[:-1], labels[:, -1] is full[-1].
+        # NOTE: in teacherless mode, `input_ids[:, prefix_len:]` was overwritten
+        # with `$` by the dataset, so we must read targets from `labels` (which
+        # is unchanged in both modes) rather than from `full`.
         full = torch.cat([input_ids, labels[:, -1:].clone()], dim=1)             # (B, L)
-        targets = full[:, prefix_len:]                                            # (B, target_len)
+        targets = labels[:, -target_len:]                                         # (B, target_len)
         seq = full.clone()
 
         if teacherless:
@@ -294,9 +297,37 @@ def main(cfg: DictConfig) -> None:
     # Model + optimizer
     # ---------------------------------------------------------------------
     model = get_model(cfg, vocab_size=tokenizer.vocab_size, block_size=block_size)
-    print(model)
     if accelerator.is_main_process:
-        log.info(f"Model: {cfg.model.name} | params: {_num_params(model):,}")
+        log.info(f"Base model: {cfg.model.name} | params: {_num_params(model):,}")
+
+    if cfg.get("nextlat", None) is not None and cfg.nextlat.get("enabled", False):
+        from next_token.nextlat import build_nextlat
+
+        horizon = cfg.nextlat.get("horizon", None)
+        if horizon is None:
+            # Path-star paper default (Sec 4.3): d = path_len - 2 so the goal
+            # node sits within the multi-step horizon of the source.
+            horizon = max(1, int(cfg.data.path_len) - 2)
+        if accelerator.is_main_process:
+            log.info(
+                f"NextLat enabled: horizon={horizon} "
+                f"lambda_h={cfg.nextlat.get('lambda_h', 1.0)} "
+                f"lambda_kl={cfg.nextlat.get('lambda_kl', 1.0)} "
+                f"n_hidden_layers={cfg.nextlat.get('n_hidden_layers', 2)} "
+                f"hidden_mult={cfg.nextlat.get('hidden_mult', 4)} "
+                f"stop_grad_target={cfg.nextlat.get('stop_grad_target', True)} "
+                f"mask_kl={cfg.nextlat.get('mask_kl', True)}"
+            )
+        model = build_nextlat(
+            model,
+            vocab_size=tokenizer.vocab_size,
+            cfg_nextlat=cfg.nextlat,
+            horizon=horizon,
+        )
+        if accelerator.is_main_process:
+            log.info(f"NextLat-wrapped params: {_num_params(model):,}")
+
+    print(model)
 
     optimizer = torch.optim.AdamW(
         model.parameters(),
@@ -338,15 +369,50 @@ def main(cfg: DictConfig) -> None:
     # wandb
     # ---------------------------------------------------------------------
     if cfg.logging.wandb and accelerator.is_main_process:
+        # Base: <model>_deg{}_path{}_nodes{} [_rev] [_tless] _lr{}_seed{}
+        # Optional suffixes -- only added when they deviate from defaults so
+        # baseline runs keep short names but ablations are distinguishable.
         run_name = (
             f"{cfg.model.name}_deg{cfg.data.deg}_path{cfg.data.path_len}_"
             f"nodes{cfg.data.num_nodes}"
             f"{'_rev' if cfg.data.reverse else ''}"
             f"{'_tless' if cfg.data.teacherless else ''}"
-            f"_lr{cfg.optimizer.lr:g}_seed{cfg.seed}"
+            f"_lr{cfg.optimizer.lr:g}"
         )
+        # Architecture overrides (only when non-default 6L/6H/384D).
+        arch_bits = []
+        if int(cfg.model.get("n_layer", 6)) != 6:
+            arch_bits.append(f"L{cfg.model.n_layer}")
+        if int(cfg.model.get("n_head", 6)) != 6:
+            arch_bits.append(f"H{cfg.model.n_head}")
+        if int(cfg.model.get("dim", 384)) != 384:
+            arch_bits.append(f"D{cfg.model.dim}")
+        if arch_bits:
+            run_name += "_" + "".join(arch_bits)
+        # Optimizer extras.
+        if float(cfg.optimizer.get("weight_decay", 0.0)) > 0:
+            run_name += f"_wd{cfg.optimizer.weight_decay:g}"
+        if int(cfg.get("batch_size", 256)) != 256:
+            run_name += f"_bs{cfg.batch_size}"
+        # NextLat suffix.
+        if cfg.get("nextlat", None) is not None and cfg.nextlat.get("enabled", False):
+            nl_horizon = cfg.nextlat.get("horizon", None)
+            nl_horizon = nl_horizon if nl_horizon is not None else max(1, int(cfg.data.path_len) - 2)
+            run_name += (
+                f"_nl"
+                f"_h{nl_horizon}"
+                f"_lh{cfg.nextlat.get('lambda_h', 1.0):g}"
+                f"_lkl{cfg.nextlat.get('lambda_kl', 1.0):g}"
+                f"_pL{cfg.nextlat.get('n_hidden_layers', 2)}"
+                f"_pM{cfg.nextlat.get('hidden_mult', 4)}"
+            )
+        run_name += f"_seed{cfg.seed}"
+        # User-supplied tag is prepended to the auto-built name.
+        custom_name = cfg.logging.get("name", None)
+        if custom_name:
+            run_name = f"{custom_name} {run_name}"
         wandb.init(
-            project=cfg.project_name,
+            project=cfg.logging.project,
             entity=cfg.logging.entity,
             name=run_name,
             config=OmegaConf.to_container(cfg, resolve=True),
@@ -438,7 +504,7 @@ def main(cfg: DictConfig) -> None:
             global_step += 1
             optimizer.zero_grad()
             with accelerator.autocast():
-                loss, _ = model(input_ids, labels=labels)
+                loss, step_stats = model(input_ids, labels=labels)
             accelerator.backward(loss)
             clip_val = cfg.optimizer.grad_clip if cfg.optimizer.grad_clip and cfg.optimizer.grad_clip > 0 else float("inf")
             grad_norm = accelerator.clip_grad_norm_(model.parameters(), clip_val)
@@ -449,24 +515,30 @@ def main(cfg: DictConfig) -> None:
             window_loss += loss.item()
             window_count += 1
             bar.update(1)
-            bar.set_postfix(
+            postfix = dict(
                 loss=f"{loss.item():.4f}",
                 grad_norm=f"{grad_norm_val:.2f}",
                 lr=f"{scheduler.get_last_lr()[0]:.5f}",
                 epoch=epoch,
             )
+            if step_stats and "nextlat/loss_next" in step_stats:
+                postfix["nl_h"] = f"{step_stats['nextlat/loss_next_h']:.3f}"
+                postfix["nl_kl"] = f"{step_stats['nextlat/loss_kl']:.3f}"
+            bar.set_postfix(**postfix)
 
             if cfg.logging.wandb and accelerator.is_main_process:
-                wandb.log(
-                    {
-                        "train/loss": loss.item(),
-                        "train/grad_norm": grad_norm_val,
-                        "train/lr": scheduler.get_last_lr()[0],
-                        "train/epoch": epoch,
-                        "train/step": global_step,
-                    },
-                    step=global_step,
-                )
+                log_payload = {
+                    "train/loss": loss.item(),
+                    "train/grad_norm": grad_norm_val,
+                    "train/lr": scheduler.get_last_lr()[0],
+                    "train/epoch": epoch,
+                    "train/step": global_step,
+                }
+                if step_stats:
+                    for k, v in step_stats.items():
+                        if k.startswith("nextlat/"):
+                            log_payload[f"train/{k}"] = v
+                wandb.log(log_payload, step=global_step)
 
             # Step-based eval
             is_last_step = global_step == total_steps
