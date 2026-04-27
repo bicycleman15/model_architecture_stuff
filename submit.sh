@@ -18,7 +18,7 @@ accelerate launch \
 --config-file accelerate.yaml --mixed_precision=bf16 --num_processes=1 \
 -m next_token.train \
 logging.project="learnability-star-graph" \
-logging.name="hybrid" \
+logging.name="nextlat predloss only" \
 data=paper \
 data.num_nodes=100 \
 \
@@ -31,15 +31,13 @@ batch_size=512 \
 optimizer.lr=5e-4 \
 optimizer.min_lr=5e-5 \
 optimizer.weight_decay=0.1 \
-schedule.epochs=50
-
-#  \
-# \
-# nextlat.enabled=true \
-# nextlat.lambda_h=1.0 \
-# nextlat.lambda_kl=1.0 \
-# nextlat.n_hidden_layers=3 \
-# nextlat.hidden_mult=1
+schedule.epochs=50 \
+\
+nextlat.enabled=true \
+nextlat.lambda_h=0 \
+nextlat.lambda_kl=1.0 \
+nextlat.n_hidden_layers=3 \
+nextlat.hidden_mult=1
 
 
 # WANDB_MODE=offline \
