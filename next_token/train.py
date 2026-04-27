@@ -309,6 +309,11 @@ def main(cfg: DictConfig) -> None:
     steps_per_epoch = max(1, len(train_loader))
     total_steps = cfg.schedule.epochs * steps_per_epoch
     warmup_steps = max(1, int(cfg.schedule.warmup_steps))
+    peak_lr = float(cfg.optimizer.lr)
+    min_lr = float(cfg.optimizer.get("min_lr", 0.0))
+    # LambdaLR returns a multiplier on the optimizer's base lr (= peak_lr),
+    # so the floor we apply at the bottom of the cosine is min_lr / peak_lr.
+    min_lr_ratio = (min_lr / peak_lr) if peak_lr > 0 else 0.0
 
     def lr_lambda(step: int) -> float:
         if step < warmup_steps:
@@ -317,7 +322,8 @@ def main(cfg: DictConfig) -> None:
             return 1.0
         progress = (step - warmup_steps) / max(1, total_steps - warmup_steps)
         progress = min(max(progress, 0.0), 1.0)
-        return 0.5 * (1.0 + math.cos(math.pi * progress))
+        cosine = 0.5 * (1.0 + math.cos(math.pi * progress))
+        return min_lr_ratio + (1.0 - min_lr_ratio) * cosine
 
     scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda=lr_lambda)
 
