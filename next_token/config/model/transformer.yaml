@@ -1,0 +1,14 @@
+name: transformer
+
+# Architecture (paper default: 6L / 384D / 6H)
+dim: 384
+n_layer: 6
+n_head: 6
+
+initializer_range: 0.02
+norm_eps: 1.0e-5
+
+# Optional fused-ops; safe to leave on, the workspace `Transformer` falls
+# back to plain RMSNorm/MLP automatically.
+use_fused_ops: true
+use_qk_norm: false
