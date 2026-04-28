@@ -557,3 +557,115 @@ class StarGraphDataset(Dataset):
 
     def train(self):
         self.eval_mode = False
+
+
+# -----------------------------------------------------------------------------
+# CoT pre-training dataset (variable-length traces)
+# -----------------------------------------------------------------------------
+
+
+class StarGraphCoTDataset(Dataset):
+    """Tokenized CoT-with-backtracking dataset.
+
+    Variable-length: each row is the full token sequence ``prefix + trace``
+    where ``prefix`` is fixed-length (computed by :func:`compute_lengths`) and
+    ``trace`` varies with the sample's realized backtrack count / depths.
+
+    ``__getitem__`` returns the 1D ``full_ids`` tensor; padding to a common
+    length is done by :func:`cot_pad_collate`.
+    """
+
+    def __init__(
+        self,
+        data_path: str | os.PathLike,
+        tokenizer: NumeralTokenizer,
+        deg: int,
+        path_len: int,
+        num_nodes: int,
+        n_samples: int | None = None,
+    ):
+        self.tokenizer = tokenizer
+        self.path_len = path_len
+
+        prefix_len, _ = compute_lengths(deg, path_len, num_nodes)
+        self.prefix_len = prefix_len
+
+        pairs = _read_samples(data_path)
+        if n_samples is not None:
+            pairs = pairs[:n_samples]
+        if len(pairs) == 0:
+            raise ValueError(f"no samples in {data_path}")
+
+        full_ids: list[torch.Tensor] = []
+        max_target_len = 0
+        for i, (prefix, target) in enumerate(pairs):
+            p = tokenizer.encode(prefix)
+            if len(p) != prefix_len:
+                raise ValueError(
+                    f"row {i}: expected prefix={prefix_len} got {len(p)}"
+                )
+            t = tokenizer.encode(target)
+            if t[-path_len:] == [] or len(t) < path_len:
+                raise ValueError(
+                    f"row {i}: trace shorter than path_len={path_len}: {target!r}"
+                )
+            full_ids.append(torch.tensor(p + t, dtype=torch.long))
+            if len(t) > max_target_len:
+                max_target_len = len(t)
+
+        self.full_ids = full_ids
+        self.max_target_len = max_target_len
+
+    def __len__(self) -> int:
+        return len(self.full_ids)
+
+    def __getitem__(self, idx: int) -> torch.Tensor:
+        return self.full_ids[idx]
+
+
+def cot_pad_collate(
+    batch: list[torch.Tensor],
+    *,
+    pad_id: int,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Right-pad variable-length CoT sequences.
+
+    Returns
+    -------
+    full_ids : (B, L_max) long
+        Padded full token sequences.
+    lengths  : (B,) long
+        Original (un-padded) length of each row.
+    """
+    lengths = torch.tensor([x.size(0) for x in batch], dtype=torch.long)
+    L_max = int(lengths.max().item())
+    B = len(batch)
+
+    padded = torch.full((B, L_max), pad_id, dtype=torch.long)
+    for i, x in enumerate(batch):
+        padded[i, : x.size(0)] = x
+    return padded, lengths
+
+
+def make_cot_train_targets(
+    full_ids: torch.Tensor,
+    lengths: torch.Tensor,
+    prefix_len: int,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Standard next-token shift + prefix/pad masking for CoT batches.
+
+    ``full_ids`` is ``(B, L)`` from :func:`cot_pad_collate`. Returns:
+      input_ids = full_ids[:, :-1]                       (B, L-1)
+      labels    = full_ids[:, 1:].clone() with positions before ``prefix_len-1``
+                  and pad positions set to ``-100``.
+    """
+    input_ids = full_ids[:, :-1].clone()
+    labels = full_ids[:, 1:].clone()
+
+    labels[:, : prefix_len - 1] = -100
+
+    B, Lm1 = labels.shape
+    pos = torch.arange(Lm1, device=labels.device).unsqueeze(0).expand(B, -1)
+    pad_mask = pos >= (lengths.to(labels.device) - 1).unsqueeze(1)
+    labels[pad_mask] = -100
+    return input_ids, labels

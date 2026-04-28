@@ -1,0 +1,57 @@
+defaults:
+  - model: transformer
+  - _self_
+
+# Pre-training a vanilla transformer on CoT-with-backtracking traces produced
+# by `next_token.generate_data_pretrain`. Eval = sample the trace with
+# temperature, scan for `</think>`, then read the next `path_len` tokens.
+
+seed: 42
+batch_size: 256
+mixed_precision: bf16
+
+data:
+  deg: 5
+  path_len: 5
+  num_nodes: 100
+  n_train: 10000000
+  n_test: 20000
+  data_dir: next_token/data
+  cot:
+    min_backtracks: 0
+    max_backtracks: null    # null -> deg-1 (must match how the data was generated)
+    min_depth: null         # null -> path_len-1
+    max_depth: null         # null -> path_len-1
+
+optimizer:
+  lr: 1e-4
+  min_lr: 0.0
+  betas: [0.9, 0.95]
+  eps: 1e-8
+  weight_decay: 0.0
+  grad_clip: 1.0
+
+schedule:
+  epochs: 100
+  warmup_steps: 100
+  use_cosine: true
+
+eval:
+  every_pct: 0.1            # full eval every X% of total training steps
+  max_batches: null         # cap eval batches (null = full test set)
+  temperature: 0.8          # sampling temperature for the AR eval
+  top_k: null               # optional top-k filter (null = off)
+  log_samples: 4            # number of decoded sampled traces to print/log per eval (0 = off)
+
+logging:
+  wandb: true
+  entity: "bicycleman15"
+  project: next_token_pretrain
+  name: ""                  # optional tag prepended to the auto-built run name
+
+hydra:
+  run:
+    dir: ${hydra:runtime.cwd}/Results/next_token/pretrain/${model.name}/deg${data.deg}_path${data.path_len}_nodes${data.num_nodes}/${now:%Y-%m-%d}/${now:%H-%M-%S}
+  sweep:
+    dir: ${hydra:runtime.cwd}/Results/next_token/pretrain/${model.name}/deg${data.deg}_path${data.path_len}_nodes${data.num_nodes}/${now:%Y-%m-%d}
+    subdir: ${now:%H-%M-%S}_${hydra.job.num}

@@ -23,7 +23,7 @@ Usage::
 
     # default: 0..deg-1 backtracks, full decoy depth, fresh-graph per sample
     python -m next_token.generate_data_pretrain --deg=5 --path_len=5 --num_nodes=100 \
-        --n_train=2000000 --n_test=20000
+        --n_train=10000000 --n_test=20000
 
     # custom range
     python -m next_token.generate_data_pretrain --deg=5 --path_len=5 --num_nodes=50 \
