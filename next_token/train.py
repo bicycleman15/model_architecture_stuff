@@ -75,6 +75,22 @@ def _build_datasets(cfg: DictConfig):
             f"--reverse={reverse}` first."
         )
 
+    log.info(
+        "Dataset paths -- dir: %s | train: %s | test: %s "
+        "(deg=%d, path_len=%d, num_nodes=%d, reverse=%s, teacherless=%s, "
+        "n_train=%d, n_test=%d)",
+        sub,
+        train_path,
+        test_path,
+        deg,
+        path_len,
+        num_nodes,
+        reverse,
+        cfg.data.teacherless,
+        cfg.data.n_train,
+        cfg.data.n_test,
+    )
+
     tokenizer = NumeralTokenizer(num_nodes=num_nodes)
     train_ds = StarGraphDataset(
         train_path,
@@ -514,6 +530,25 @@ def main(cfg: DictConfig) -> None:
 
             window_loss += loss.item()
             window_count += 1
+
+            # Per-token train accuracy on the current batch (cheap teacher-forced
+            # readout). Throttled by `eval.train_acc_every_steps` since it costs
+            # one extra forward when the main path uses fused-linear-CE.
+            train_acc_every = int(cfg.eval.get("train_acc_every_steps", 1))
+            train_acc_stats: dict[str, float] = {}
+            if train_acc_every > 0 and (global_step % train_acc_every == 0):
+                with torch.no_grad():
+                    with accelerator.autocast():
+                        train_logits, _ = model(input_ids, labels=None)
+                    preds_t = train_logits[:, -target_len:, :].argmax(dim=-1)
+                    targets_t = labels[:, -target_len:]
+                    correct_t = preds_t.eq(targets_t)                       # (B,T) bool
+                per_pos = correct_t.float().mean(dim=0).cpu().tolist()
+                seq_acc = correct_t.all(dim=1).float().mean().item()
+                train_acc_stats["train/forced_seq_acc"] = seq_acc
+                for j in range(target_len):
+                    train_acc_stats[f"train/forced_token_{j}"] = per_pos[j]
+
             bar.update(1)
             postfix = dict(
                 loss=f"{loss.item():.4f}",
@@ -524,6 +559,12 @@ def main(cfg: DictConfig) -> None:
             if step_stats and "nextlat/loss_next" in step_stats:
                 postfix["nl_h"] = f"{step_stats['nextlat/loss_next_h']:.3f}"
                 postfix["nl_kl"] = f"{step_stats['nextlat/loss_kl']:.3f}"
+            if train_acc_stats:
+                # 0, 1, t-2, t-1 (matches the eval log)
+                report_idx = sorted({0, 1, target_len - 2, target_len - 1})
+                postfix["acc"] = "/".join(
+                    f"{train_acc_stats[f'train/forced_token_{j}']:.2f}" for j in report_idx
+                )
             bar.set_postfix(**postfix)
 
             if cfg.logging.wandb and accelerator.is_main_process:
@@ -538,6 +579,8 @@ def main(cfg: DictConfig) -> None:
                     for k, v in step_stats.items():
                         if k.startswith("nextlat/"):
                             log_payload[f"train/{k}"] = v
+                if train_acc_stats:
+                    log_payload.update(train_acc_stats)
                 wandb.log(log_payload, step=global_step)
 
             # Step-based eval

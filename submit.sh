@@ -4,7 +4,7 @@
 #SBATCH --output=slurm_logs/%j_%x.out
 #SBATCH --error=slurm_logs/%j_%x.err
 #SBATCH --export=ALL
-#SBATCH --time=2:00:00
+#SBATCH --time=4:00:00
 #SBATCH --gres=gpu:1
 #SBATCH --mem=32G
 #SBATCH --cpus-per-task=8
@@ -14,30 +14,50 @@
 # use `sbatch submit.slurm`
 # note we do not have WANDB_MODE=offline here because we are submitting the job to the cluster
 
+# WANDB_MODE=offline \
 accelerate launch \
 --config-file accelerate.yaml --mixed_precision=bf16 --num_processes=1 \
 -m next_token.train \
 logging.project="learnability-star-graph" \
-logging.name="nextlat predloss only" \
+logging.name="multi vanilla vocab 32 10x data" \
 data=paper \
-data.num_nodes=100 \
+data.num_nodes=32 \
+data.n_train=2000000 \
 \
-model=hybrid \
 model.n_layer=12 \
-model.n_head=6 \
-model.dim=384 \
+model=transformer \
 \
 batch_size=512 \
+schedule.warmup_steps=1000 \
 optimizer.lr=5e-4 \
 optimizer.min_lr=5e-5 \
 optimizer.weight_decay=0.1 \
 schedule.epochs=50 \
-\
-nextlat.enabled=true \
-nextlat.lambda_h=0 \
-nextlat.lambda_kl=1.0 \
-nextlat.n_hidden_layers=3 \
-nextlat.hidden_mult=1
+eval.every_pct=0.01 \
+data.teacherless=true
+
+# \
+# nextlat.enabled=true \
+# nextlat.lambda_h=0 \
+# nextlat.lambda_kl=1.0 \
+# nextlat.n_hidden_layers=3 \
+# nextlat.hidden_mult=1
+
+# model=hybrid \
+# 'model.pattern=[attention,rnn]' \
+# model.rnn.gradient_clipping=1.0 \
+
+# WANDB_MODE=offline \
+# accelerate launch \
+# --config-file accelerate.yaml --mixed_precision=bf16 --num_processes=1 \
+# -m next_token.train \
+# logging.project=learnability-star-graph logging.name=test \
+# data=paper data.num_nodes=100 \
+# model=hybrid \
+# 'model.pattern=[rnn, attention]' \
+# model.n_layer=12 batch_size=512 \
+# optimizer.lr=5e-4 optimizer.min_lr=5e-5 optimizer.weight_decay=0.1 \
+# schedule.epochs=50
 
 
 # WANDB_MODE=offline \

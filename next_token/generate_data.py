@@ -9,8 +9,8 @@ config (``data.dir`` defaults to ``next_token/data``).
 
 Usage::
 
-    python -m next_token.generate_data --deg=5 --path_len=5 --num_nodes=100 \
-        --n_train=200000 --n_test=20000
+    python -m next_token.generate_data --deg=5 --path_len=5 --num_nodes=32 \
+        --n_train=2000000 --n_test=20000
 
     python -m next_token.generate_data --deg=2 --path_len=5 --num_nodes=20 \
         --n_train=20000 --n_test=2000

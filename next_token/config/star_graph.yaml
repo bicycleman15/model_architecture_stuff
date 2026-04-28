@@ -34,9 +34,11 @@ schedule:
 mixed_precision: bf16
 
 eval:
-  every_pct: 0.1          # run eval every X% of total training steps
-  free_generation: true   # also run greedy autoregressive eval
-  max_batches: null       # cap eval batches (null = full test set)
+  every_pct: 0.1               # run full eval every X% of total training steps
+  free_generation: true        # also run greedy autoregressive eval
+  max_batches: null            # cap eval batches (null = full test set)
+  train_acc_every_steps: 10     # log per-token teacher-forced train-batch acc
+                               # every N steps (0 disables; 1 = every step)
 
 logging:
   wandb: true

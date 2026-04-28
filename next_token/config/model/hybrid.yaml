@@ -1,10 +1,34 @@
-# Hybrid: alternates GatedDeltaNet and Transformer attention blocks.
-# Default pattern (n_layer=6, pattern_start_with=deltanet):
-#   [DN, Attn, DN, Attn, DN, Attn]
+# Hybrid model that interleaves sequence mixers from the set
+# {attention (TransformerBlock), deltanet (GatedDeltaNet), rnn (M2RNN)}.
+#
+# Layer pattern:
+#   * Set `pattern` to a list of mixer types.
+#       - If len(pattern) == n_layer, the list is used verbatim.
+#       - If len(pattern) <  n_layer, the list is cycled
+#         (layer i gets pattern[i % len(pattern)]).
+#     Examples:
+#         pattern: [deltanet, attention]               # alternating DN/Attn (default)
+#         pattern: [rnn, attention]                    # alternating RNN/Attn
+#         pattern: [rnn, attention, deltanet]          # 3-cycle RNN/Attn/DN
+#         pattern: [rnn]                               # all RNN
+#   * If `pattern` is null, fall back to the legacy 2-way alternation
+#     between `attention` and `deltanet`, with `pattern_start_with`
+#     selecting layer 0.
+#
+# Per-layer overrides (applied AFTER `pattern` is materialized):
+#   * `pattern_overrides` maps a layer index (int, supports negative
+#     Python-style indexing) to a mixer type. Useful for pinning specific
+#     positions on top of a short cycle.
+#     Examples:
+#         pattern: [rnn, attention]
+#         pattern_overrides: {-1: rnn}                 # final layer is rnn
+#         pattern_overrides: {0: rnn, -1: rnn}         # rnn at both ends
 name: hybrid
 dim: 384
 n_layer: 12
-pattern_start_with: deltanet   # or "attention" to flip the alternation
+pattern: null
+pattern_overrides: null
+pattern_start_with: deltanet   # only used when `pattern` is null
 
 # TransformerBlock sub-layer (workspace models/transformer.py)
 attn:
@@ -21,6 +45,20 @@ deltanet:
   use_short_conv: true
   use_gate: true
   conv_size: 4
+
+# M2RNN sub-layer (state_tracking/models/rnn). Per-layer state tensor is
+# [B, S, num_heads, key_head_dim, value_head_dim]. Defaults below match the
+# state_tracking RNN baseline scaled to dim=384:
+#   num_heads * value_head_dim = 6 * 32 = 192 (mixer output dim before
+#   output_projection back to dim=384).
+# `backend`: "triton" (fused CUDA kernel; faster) or "torch" (pure-PyTorch
+# fallback). Correctness is equivalent.
+rnn:
+  num_heads: 6
+  key_head_dim: 32
+  value_head_dim: 32
+  backend: triton
+  gradient_clipping: null
 
 initializer_range: 0.02
 norm_eps: 1.0e-5
