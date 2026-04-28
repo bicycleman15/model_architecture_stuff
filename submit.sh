@@ -19,22 +19,27 @@ accelerate launch \
 --config-file accelerate.yaml --mixed_precision=bf16 --num_processes=1 \
 -m next_token.train \
 logging.project="learnability-star-graph" \
-logging.name="multi vanilla vocab 32 10x data" \
+logging.name="3 probe" \
 data=paper \
-data.num_nodes=32 \
-data.n_train=2000000 \
+data.num_nodes=100 \
+data.n_train=200000 \
 \
 model.n_layer=12 \
 model=transformer \
 \
 batch_size=512 \
-schedule.warmup_steps=1000 \
+schedule.warmup_steps=100 \
 optimizer.lr=5e-4 \
 optimizer.min_lr=5e-5 \
 optimizer.weight_decay=0.1 \
 schedule.epochs=50 \
 eval.every_pct=0.01 \
-data.teacherless=true
+\
+nextlat.enabled=true \
+nextlat.lambda_h=1.0 \
+nextlat.lambda_kl=0.0 \
+nextlat.n_hidden_layers=3 \
+nextlat.hidden_mult=1
 
 # \
 # nextlat.enabled=true \
@@ -42,6 +47,8 @@ data.teacherless=true
 # nextlat.lambda_kl=1.0 \
 # nextlat.n_hidden_layers=3 \
 # nextlat.hidden_mult=1
+
+# data.teacherless=true
 
 # model=hybrid \
 # 'model.pattern=[attention,rnn]' \
