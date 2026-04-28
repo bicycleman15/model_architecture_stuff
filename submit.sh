@@ -17,10 +17,9 @@
 # WANDB_MODE=offline \
 accelerate launch \
 --config-file accelerate.yaml --mixed_precision=bf16 --num_processes=1 \
--m next_token.train \
-logging.project="learnability-star-graph" \
-logging.name="new mtp" \
-data=paper \
+-m next_token.pretrain \
+logging.project="pretrain-slow-think-fast" \
+logging.name="test" \
 data.num_nodes=100 \
 data.n_train=200000 \
 \
@@ -32,15 +31,39 @@ schedule.warmup_steps=100 \
 optimizer.lr=5e-4 \
 optimizer.min_lr=5e-5 \
 optimizer.weight_decay=0.1 \
-schedule.epochs=50 \
-eval.every_pct=0.01 \
-\
-mtp.enabled=true \
-mtp.n_layer=4 \
-mtp.horizon=4 \
-mtp.lambda_mtp=1.0 \
-mtp.tie_wte=false \
-mtp.tie_lm_head=true
+schedule.epochs=10 \
+eval.every_pct=0.2 \
+eval.log_samples=2 \
+eval.max_batches=128
+
+
+# WANDB_MODE=offline \
+# accelerate launch \
+# --config-file accelerate.yaml --mixed_precision=bf16 --num_processes=1 \
+# -m next_token.train \
+# logging.project="learnability-star-graph" \
+# logging.name="new mtp" \
+# data=paper \
+# data.num_nodes=100 \
+# data.n_train=200000 \
+# \
+# model.n_layer=12 \
+# model=transformer \
+# \
+# batch_size=512 \
+# schedule.warmup_steps=100 \
+# optimizer.lr=5e-4 \
+# optimizer.min_lr=5e-5 \
+# optimizer.weight_decay=0.1 \
+# schedule.epochs=50 \
+# eval.every_pct=0.01 \
+# \
+# mtp.enabled=true \
+# mtp.n_layer=4 \
+# mtp.horizon=4 \
+# mtp.lambda_mtp=1.0 \
+# mtp.tie_wte=false \
+# mtp.tie_lm_head=true
 
 # \
 # nextlat.enabled=true \
