@@ -66,6 +66,26 @@ nextlat:
   stop_grad_target: true   # detach target hidden states (Algorithm 1's sg(.))
   mask_kl: true            # average KL only over non-(-100) label positions
 
+# Multi-Token Prediction head (parallel transformer, no latent rollout).
+# For each base position t, a small causal transformer takes
+# [h_t, emb(x_{t+1}), ..., emb(x_{t+horizon-1})] and predicts
+# x_{t+1}, x_{t+2}, ..., x_{t+horizon} in parallel via causal self-attention,
+# flattened across (B, T) so the head runs at length=horizon.
+# Mutually exclusive with nextlat.enabled.
+mtp:
+  enabled: false
+  horizon: null            # null -> auto: max(2, path_len - 1)
+  n_layer: 4               # depth of the small transformer
+  n_head: 6                # must divide model.dim
+  lambda_mtp: 1.0
+  skip_depth_1: true       # mask out the redundant 1-step prediction (= base lm-head)
+  tie_wte: false            # share input embedding with base model
+  tie_lm_head: true        # share lm-head with base model
+  use_qk_norm: false
+  use_fused_ops: true      # null -> follow base model.use_fused_ops (Liger MLP /
+                           # RMSNorm + fused linear+CE; falls back to plain ops
+                           # automatically when the kernels are unavailable)
+
 hydra:
   run:
     dir: ${hydra:runtime.cwd}/Results/next_token/${model.name}/deg${data.deg}_path${data.path_len}_nodes${data.num_nodes}/${now:%Y-%m-%d}/${now:%H-%M-%S}

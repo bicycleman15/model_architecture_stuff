@@ -316,7 +316,18 @@ def main(cfg: DictConfig) -> None:
     if accelerator.is_main_process:
         log.info(f"Base model: {cfg.model.name} | params: {_num_params(model):,}")
 
-    if cfg.get("nextlat", None) is not None and cfg.nextlat.get("enabled", False):
+    nextlat_enabled = (
+        cfg.get("nextlat", None) is not None and cfg.nextlat.get("enabled", False)
+    )
+    mtp_enabled = (
+        cfg.get("mtp", None) is not None and cfg.mtp.get("enabled", False)
+    )
+    if nextlat_enabled and mtp_enabled:
+        raise ValueError(
+            "nextlat.enabled and mtp.enabled are mutually exclusive; pick one."
+        )
+
+    if nextlat_enabled:
         from next_token.nextlat import build_nextlat
 
         horizon = cfg.nextlat.get("horizon", None)
@@ -342,6 +353,42 @@ def main(cfg: DictConfig) -> None:
         )
         if accelerator.is_main_process:
             log.info(f"NextLat-wrapped params: {_num_params(model):,}")
+
+    if mtp_enabled:
+        from next_token.mtp import build_mtp
+
+        mtp_horizon = cfg.mtp.get("horizon", None)
+        if mtp_horizon is None:
+            mtp_horizon = max(2, int(cfg.data.path_len) - 1)
+        padded_vocab_size = int(model.config.padded_vocab_size)
+        if accelerator.is_main_process:
+            mtp_fused_raw = cfg.mtp.get("use_fused_ops", None)
+            mtp_fused_resolved = (
+                bool(getattr(model.config, "use_fused_ops", False))
+                if mtp_fused_raw is None
+                else bool(mtp_fused_raw)
+            )
+            log.info(
+                f"MTP enabled: horizon={mtp_horizon} "
+                f"n_layer={cfg.mtp.get('n_layer', 2)} "
+                f"n_head={cfg.mtp.get('n_head', 6)} "
+                f"lambda_mtp={cfg.mtp.get('lambda_mtp', 1.0)} "
+                f"skip_depth_1={cfg.mtp.get('skip_depth_1', True)} "
+                f"tie_wte={cfg.mtp.get('tie_wte', True)} "
+                f"tie_lm_head={cfg.mtp.get('tie_lm_head', True)} "
+                f"use_qk_norm={cfg.mtp.get('use_qk_norm', False)} "
+                f"use_fused_ops={mtp_fused_resolved} (cfg={mtp_fused_raw}) "
+                f"padded_vocab_size={padded_vocab_size}"
+            )
+        model = build_mtp(
+            model,
+            vocab_size=tokenizer.vocab_size,
+            padded_vocab_size=padded_vocab_size,
+            cfg_mtp=cfg.mtp,
+            horizon=mtp_horizon,
+        )
+        if accelerator.is_main_process:
+            log.info(f"MTP-wrapped params: {_num_params(model):,}")
 
     print(model)
 
@@ -421,6 +468,20 @@ def main(cfg: DictConfig) -> None:
                 f"_lkl{cfg.nextlat.get('lambda_kl', 1.0):g}"
                 f"_pL{cfg.nextlat.get('n_hidden_layers', 2)}"
                 f"_pM{cfg.nextlat.get('hidden_mult', 4)}"
+            )
+        # MTP suffix.
+        if cfg.get("mtp", None) is not None and cfg.mtp.get("enabled", False):
+            m_horizon = cfg.mtp.get("horizon", None)
+            m_horizon = m_horizon if m_horizon is not None else max(2, int(cfg.data.path_len) - 1)
+            run_name += (
+                f"_mtp"
+                f"_h{m_horizon}"
+                f"_lm{cfg.mtp.get('lambda_mtp', 1.0):g}"
+                f"_L{cfg.mtp.get('n_layer', 2)}"
+                f"_H{cfg.mtp.get('n_head', 6)}"
+                f"_sd1{int(bool(cfg.mtp.get('skip_depth_1', True)))}"
+                f"_tw{int(bool(cfg.mtp.get('tie_wte', True)))}"
+                f"_tlm{int(bool(cfg.mtp.get('tie_lm_head', True)))}"
             )
         run_name += f"_seed{cfg.seed}"
         # User-supplied tag is prepended to the auto-built name.
@@ -559,6 +620,14 @@ def main(cfg: DictConfig) -> None:
             if step_stats and "nextlat/loss_next" in step_stats:
                 postfix["nl_h"] = f"{step_stats['nextlat/loss_next_h']:.3f}"
                 postfix["nl_kl"] = f"{step_stats['nextlat/loss_kl']:.3f}"
+            if step_stats and "mtp/loss_mtp" in step_stats:
+                postfix["mtp"] = f"{step_stats['mtp/loss_mtp']:.3f}"
+                # Deepest depth: loss_d{H} (most informative far-horizon signal).
+                deep_keys = [k for k in step_stats if k.startswith("mtp/loss_d")]
+                if deep_keys:
+                    deepest = max(deep_keys, key=lambda k: int(k.split("_d")[-1]))
+                    depth = deepest.split("_d")[-1]
+                    postfix[f"mtp_d{depth}"] = f"{step_stats[deepest]:.3f}"
             if train_acc_stats:
                 # 0, 1, t-2, t-1 (matches the eval log)
                 report_idx = sorted({0, 1, target_len - 2, target_len - 1})
@@ -577,7 +646,7 @@ def main(cfg: DictConfig) -> None:
                 }
                 if step_stats:
                     for k, v in step_stats.items():
-                        if k.startswith("nextlat/"):
+                        if k.startswith("nextlat/") or k.startswith("mtp/"):
                             log_payload[f"train/{k}"] = v
                 if train_acc_stats:
                     log_payload.update(train_acc_stats)

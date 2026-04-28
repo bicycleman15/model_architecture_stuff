@@ -19,7 +19,7 @@ accelerate launch \
 --config-file accelerate.yaml --mixed_precision=bf16 --num_processes=1 \
 -m next_token.train \
 logging.project="learnability-star-graph" \
-logging.name="3 probe" \
+logging.name="new mtp" \
 data=paper \
 data.num_nodes=100 \
 data.n_train=200000 \
@@ -35,11 +35,12 @@ optimizer.weight_decay=0.1 \
 schedule.epochs=50 \
 eval.every_pct=0.01 \
 \
-nextlat.enabled=true \
-nextlat.lambda_h=1.0 \
-nextlat.lambda_kl=0.0 \
-nextlat.n_hidden_layers=3 \
-nextlat.hidden_mult=1
+mtp.enabled=true \
+mtp.n_layer=4 \
+mtp.horizon=4 \
+mtp.lambda_mtp=1.0 \
+mtp.tie_wte=false \
+mtp.tie_lm_head=true
 
 # \
 # nextlat.enabled=true \
