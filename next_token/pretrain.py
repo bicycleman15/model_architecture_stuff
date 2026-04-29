@@ -45,7 +45,6 @@ from next_token.data import (  # noqa: E402
     cot_pad_collate,
     make_cot_train_targets,
 )
-from next_token.generate_data_pretrain import dataset_dirname_pretrain  # noqa: E402
 from next_token.models import get_model  # noqa: E402
 
 log = logging.getLogger(__name__)
@@ -56,63 +55,65 @@ def _num_params(model) -> int:
     return sum(p.numel() for p in model.parameters() if p.requires_grad)
 
 
-def _resolve_cot_params(cfg: DictConfig) -> tuple[int, int, int, int]:
-    deg = int(cfg.data.deg)
-    path_len = int(cfg.data.path_len)
-    cot = cfg.data.cot
-    min_b = int(cot.min_backtracks)
-    max_b = int(cot.max_backtracks) if cot.max_backtracks is not None else deg - 1
-    min_d = int(cot.min_depth) if cot.min_depth is not None else path_len - 1
-    max_d = int(cot.max_depth) if cot.max_depth is not None else path_len - 1
-    return min_b, max_b, min_d, max_d
-
-
 def _build_datasets(cfg: DictConfig):
-    deg = int(cfg.data.deg)
-    path_len = int(cfg.data.path_len)
-    num_nodes = int(cfg.data.num_nodes)
-    min_b, max_b, min_d, max_d = _resolve_cot_params(cfg)
+    """Resolve a dataset folder, read its ``meta.json`` and build the datasets.
 
+    All graph/CoT params (``deg``, ``path_len``, ``num_nodes``, ``cot.*``,
+    ``max_target_len``) are read from ``<dataset>/meta.json`` -- the trainer
+    config only needs to point at the folder.
+    """
     data_dir = Path(cfg.data.data_dir)
     if not data_dir.is_absolute():
         data_dir = Path(hydra.core.hydra_config.HydraConfig.get().runtime.cwd) / data_dir
-    sub = data_dir / dataset_dirname_pretrain(
-        deg, path_len, num_nodes, min_b, max_b, min_d, max_d
-    )
+    sub = data_dir / str(cfg.data.dataset)
     train_path = sub / "train.txt"
     test_path = sub / "test.txt"
     meta_path = sub / "meta.json"
-    if not train_path.exists() or not test_path.exists() or not meta_path.exists():
+    if not meta_path.exists():
         raise FileNotFoundError(
-            f"Missing one of {train_path} / {test_path} / {meta_path}. "
-            f"Run `python -m next_token.generate_data_pretrain --deg={deg} "
-            f"--path_len={path_len} --num_nodes={num_nodes} "
-            f"--n_train={cfg.data.n_train} --n_test={cfg.data.n_test} "
-            f"--min_backtracks={min_b} --max_backtracks={max_b} "
-            f"--min_depth={min_d} --max_depth={max_d}` first."
+            f"Missing meta.json at {meta_path}. Generate the dataset first:\n"
+            f"  python -m next_token.generate_data_pretrain --name={cfg.data.dataset} ..."
         )
     with open(meta_path) as f:
         meta = json.load(f)
 
+    deg = int(meta["deg"])
+    path_len = int(meta["path_len"])
+    num_nodes = int(meta["num_nodes"])
+    cot = meta.get("cot", {})
+    min_b = int(cot.get("min_backtracks", 0))
+    max_b = int(cot.get("max_backtracks", deg - 1))
+    min_d = int(cot.get("min_depth", path_len - 1))
+    max_d = int(cot.get("max_depth", path_len - 1))
+
     log.info(
         "Dataset paths -- dir: %s | train: %s | test: %s "
         "(deg=%d path_len=%d num_nodes=%d cot=b%d-%d/d%d-%d "
-        "n_train=%d n_test=%d max_target_len=%d)",
+        "n_train_cap=%s n_test_cap=%s max_target_len=%d)",
         sub, train_path, test_path,
         deg, path_len, num_nodes,
         min_b, max_b, min_d, max_d,
-        cfg.data.n_train, cfg.data.n_test, meta["max_target_len"],
+        cfg.data.get("n_train", None), cfg.data.get("n_test", None),
+        meta["max_target_len"],
     )
 
     tokenizer = NumeralTokenizer(num_nodes=num_nodes)
+    n_train_cap = cfg.data.get("n_train", None)
+    n_test_cap = cfg.data.get("n_test", None)
     train_ds = StarGraphCoTDataset(
         train_path, tokenizer, deg=deg, path_len=path_len, num_nodes=num_nodes,
-        n_samples=cfg.data.n_train,
+        n_samples=int(n_train_cap) if n_train_cap is not None else None,
     )
     test_ds = StarGraphCoTDataset(
         test_path, tokenizer, deg=deg, path_len=path_len, num_nodes=num_nodes,
-        n_samples=cfg.data.n_test,
+        n_samples=int(n_test_cap) if n_test_cap is not None else None,
     )
+
+    # Stash the resolved ints back so downstream code can read them.
+    meta["_resolved"] = {
+        "deg": deg, "path_len": path_len, "num_nodes": num_nodes,
+        "min_b": min_b, "max_b": max_b, "min_d": min_d, "max_d": max_d,
+    }
     return tokenizer, train_ds, test_ds, meta
 
 
@@ -154,6 +155,7 @@ def _eval_cot(
     max_target_len: int,
     pad_id: int,
     think_close_id: int,
+    eos_id: int,
     temperature: float,
     top_k: int | None,
     max_batches: int | None,
@@ -176,6 +178,7 @@ def _eval_cot(
     total_correct_seq = 0
     total_seq = 0
     total_no_close = 0
+    total_eos_ok = 0
     total_correct_per_pos = torch.zeros(path_len, dtype=torch.long)
     total_per_pos = torch.zeros(path_len, dtype=torch.long)
     total_loss = 0.0
@@ -207,11 +210,20 @@ def _eval_cot(
             dim=1,
         )
 
+        # Per-row early-stop on <eos>: once a row emits EOS, the EOS itself is
+        # kept (so `eos_ok` works) but subsequent positions are filled with
+        # ``pad_id``. We also break out of the loop entirely once every row in
+        # the batch is done, which saves model forwards on later positions.
+        done = torch.zeros(B, dtype=torch.bool, device=device)
         for t in range(max_target_len):
             with accelerator.autocast():
                 logits, _ = model(seq[:, : prefix_len + t], labels=None)
             nxt = _sample_next(logits[:, -1, :], temperature, top_k, vocab_size)
+            nxt = torch.where(done, torch.full_like(nxt, pad_id), nxt)
             seq[:, prefix_len + t] = nxt
+            done = done | (nxt == eos_id)
+            if bool(done.all().item()):
+                break
 
         gen = seq[:, prefix_len:]                                                # (B, max_target_len)
 
@@ -221,8 +233,11 @@ def _eval_cot(
         gt = full_ids_d.gather(1, gather_idx)                                      # (B, path_len)
 
         # Predicted path: next path_len tokens after the first </think> in gen.
+        # eos_ok: token immediately after that path slice is `<eos>`.
         pred = torch.full((B, path_len), pad_id, dtype=torch.long, device=device)
         valid = torch.zeros(B, dtype=torch.bool, device=device)
+        eos_ok = torch.zeros(B, dtype=torch.bool, device=device)
+        L_gen = gen.size(1)
         for b in range(B):
             row = gen[b]
             close_pos = (row == think_close_id).nonzero(as_tuple=False)
@@ -230,21 +245,24 @@ def _eval_cot(
                 continue
             start = int(close_pos[0].item()) + 1
             end = start + path_len
-            if end > row.size(0):
+            if end > L_gen:
                 continue
             pred[b] = row[start:end]
             valid[b] = True
+            if end < L_gen and row[end].item() == eos_id:
+                eos_ok[b] = True
 
         correct = pred.eq(gt) & valid.unsqueeze(1)                                # (B, path_len)
         seq_ok = correct.all(dim=1) & valid
 
-        correct_g, valid_g, seq_ok_g = accelerator.gather_for_metrics(
-            (correct, valid, seq_ok)
+        correct_g, valid_g, seq_ok_g, eos_ok_g = accelerator.gather_for_metrics(
+            (correct, valid, seq_ok, eos_ok)
         )
         total_correct_per_pos += correct_g.sum(dim=0).cpu().long()
         total_per_pos += correct_g.shape[0]
         total_correct_seq += seq_ok_g.sum().item()
         total_no_close += (~valid_g).sum().item()
+        total_eos_ok += eos_ok_g.sum().item()
         total_seq += correct_g.shape[0]
 
         # Capture a few decoded samples from the very first batch (main process).
@@ -262,6 +280,7 @@ def _eval_cot(
             gt_cpu = gt.cpu()
             valid_cpu = valid.cpu()
             seq_ok_cpu = seq_ok.cpu()
+            eos_ok_cpu = eos_ok.cpu()
             for b in range(n_log):
                 L_b = int(lengths_cpu[b].item())
                 prefix_str = tokenizer.decode(full_cpu[b, :prefix_len].tolist())
@@ -281,6 +300,7 @@ def _eval_cot(
                         "gt_path": gt_path_str,
                         "pred_path": pred_path_str,
                         "correct": bool(seq_ok_cpu[b].item()),
+                        "eos_ok": bool(eos_ok_cpu[b].item()),
                     }
                 )
 
@@ -288,6 +308,7 @@ def _eval_cot(
     if total_seq > 0:
         metrics["val/sample_seq_acc"] = total_correct_seq / total_seq
         metrics["val/no_think_close_rate"] = total_no_close / total_seq
+        metrics["val/eos_correct_pos_rate"] = total_eos_ok / total_seq
         for j in range(path_len):
             metrics[f"val/sample_token_{j}"] = (
                 total_correct_per_pos[j].item() / max(1, total_per_pos[j].item())
@@ -308,9 +329,9 @@ def main(cfg: DictConfig) -> None:
 
     # ------------------------------------------------------------------ data
     tokenizer, train_ds, test_ds, meta = _build_datasets(cfg)
-    deg = int(cfg.data.deg)
-    path_len = int(cfg.data.path_len)
-    num_nodes = int(cfg.data.num_nodes)
+    deg = int(meta["_resolved"]["deg"])
+    path_len = int(meta["_resolved"]["path_len"])
+    num_nodes = int(meta["_resolved"]["num_nodes"])
 
     prefix_len, _ = compute_lengths(deg, path_len, num_nodes)
     assert prefix_len == train_ds.prefix_len == test_ds.prefix_len
@@ -391,10 +412,8 @@ def main(cfg: DictConfig) -> None:
 
     # ----------------------------------------------------------------- wandb
     if cfg.logging.wandb and accelerator.is_main_process:
-        min_b, max_b, min_d, max_d = _resolve_cot_params(cfg)
         run_name = (
-            f"pre_{cfg.model.name}_deg{deg}_path{path_len}_nodes{num_nodes}"
-            f"_b{min_b}-{max_b}_d{min_d}-{max_d}"
+            f"pre_{cfg.model.name}_{cfg.data.dataset}"
             f"_lr{cfg.optimizer.lr:g}"
         )
         arch_bits = []
@@ -442,6 +461,7 @@ def main(cfg: DictConfig) -> None:
             max_target_len=max_target_len,
             pad_id=tokenizer.DUMMY,
             think_close_id=tokenizer.THINK_CLOSE,
+            eos_id=tokenizer.EOS,
             temperature=float(cfg.eval.temperature),
             top_k=cfg.eval.get("top_k", None),
             max_batches=cfg.eval.get("max_batches", None),
@@ -464,28 +484,33 @@ def main(cfg: DictConfig) -> None:
                 f"forced_loss={metrics.get('val/forced_loss', float('nan')):.4f} "
                 f"sample_seq={metrics.get('val/sample_seq_acc', float('nan')):.4f} "
                 f"no_close={metrics.get('val/no_think_close_rate', float('nan')):.3f} "
+                f"eos_pos={metrics.get('val/eos_correct_pos_rate', float('nan')):.3f} "
                 f"{tok_str}"
             )
             for k, s in enumerate(samples_log):
                 log.info(
-                    "  sample[%d] correct=%s\n"
+                    "  sample[%d] correct=%s eos_ok=%s\n"
                     "    prefix:    %s\n"
                     "    gt_trace:  %s\n"
                     "    gen:       %s\n"
                     "    gt_path:   %s\n"
                     "    pred_path: %s",
-                    k, s["correct"],
+                    k, s["correct"], s["eos_ok"],
                     s["prefix"], s["gt_trace"], s["gen"], s["gt_path"], s["pred_path"],
                 )
             if cfg.logging.wandb:
                 wandb.log(metrics, step=step)
                 if samples_log:
                     table = wandb.Table(
-                        columns=["step", "idx", "correct", "gt_path", "pred_path", "gen", "gt_trace"]
+                        columns=[
+                            "step", "idx", "correct", "eos_ok",
+                            "gt_path", "pred_path", "gen", "gt_trace",
+                        ]
                     )
                     for k, s in enumerate(samples_log):
                         table.add_data(
-                            step, k, s["correct"], s["gt_path"], s["pred_path"], s["gen"], s["gt_trace"]
+                            step, k, s["correct"], s["eos_ok"],
+                            s["gt_path"], s["pred_path"], s["gen"], s["gt_trace"],
                         )
                     wandb.log({"val/samples": table}, step=step)
         model.train()

@@ -11,17 +11,14 @@ batch_size: 256
 mixed_precision: bf16
 
 data:
-  deg: 5
-  path_len: 5
-  num_nodes: 100
-  n_train: 10000000
-  n_test: 20000
+  # Folder name under `data_dir` produced by `next_token.generate_data_pretrain`
+  # (default name encodes the params, but you can pass `--name=...` at gen time
+  # and reference that here). All graph/CoT params are read from
+  # `<dataset>/meta.json` at training time.
+  dataset: deg5_path5_nodes100_cot_b0-4_d4-4
   data_dir: next_token/data
-  cot:
-    min_backtracks: 0
-    max_backtracks: null    # null -> deg-1 (must match how the data was generated)
-    min_depth: null         # null -> path_len-1
-    max_depth: null         # null -> path_len-1
+  n_train: null             # optional cap (null = use whole train.bin)
+  n_test: null              # optional cap (null = use whole test.bin)
 
 optimizer:
   lr: 1e-4
@@ -51,7 +48,7 @@ logging:
 
 hydra:
   run:
-    dir: ${hydra:runtime.cwd}/Results/next_token/pretrain/${model.name}/deg${data.deg}_path${data.path_len}_nodes${data.num_nodes}/${now:%Y-%m-%d}/${now:%H-%M-%S}
+    dir: ${hydra:runtime.cwd}/Results/next_token/pretrain/${model.name}/${data.dataset}/${now:%Y-%m-%d}/${now:%H-%M-%S}
   sweep:
-    dir: ${hydra:runtime.cwd}/Results/next_token/pretrain/${model.name}/deg${data.deg}_path${data.path_len}_nodes${data.num_nodes}/${now:%Y-%m-%d}
+    dir: ${hydra:runtime.cwd}/Results/next_token/pretrain/${model.name}/${data.dataset}/${now:%Y-%m-%d}
     subdir: ${now:%H-%M-%S}_${hydra.job.num}

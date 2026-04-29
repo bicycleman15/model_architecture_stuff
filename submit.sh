@@ -14,14 +14,14 @@
 # use `sbatch submit.slurm`
 # note we do not have WANDB_MODE=offline here because we are submitting the job to the cluster
 
-# WANDB_MODE=offline \
+WANDB_MODE=offline \
 accelerate launch \
 --config-file accelerate.yaml --mixed_precision=bf16 --num_processes=1 \
 -m next_token.pretrain \
 logging.project="pretrain-slow-think-fast" \
 logging.name="test" \
-data.num_nodes=100 \
-data.n_train=200000 \
+\
+data.dataset="star_5M" \
 \
 model.n_layer=12 \
 model=transformer \
@@ -31,9 +31,9 @@ schedule.warmup_steps=100 \
 optimizer.lr=5e-4 \
 optimizer.min_lr=5e-5 \
 optimizer.weight_decay=0.1 \
-schedule.epochs=10 \
-eval.every_pct=0.2 \
-eval.log_samples=2 \
+schedule.epochs=1 \
+eval.every_pct=0.1 \
+eval.log_samples=20 \
 eval.max_batches=128
 
 
@@ -96,7 +96,7 @@ eval.max_batches=128
 # --config-path config \
 # --config-name bpe.yaml \
 # wandb.project="overfit-path" \
-# wandb.exp_name="vanilla muon" \
+# wandb.exp_name="vanilla adam" \
 # \
 # train.batch_size=64 \
 # train.global_batch_size=64 \
@@ -113,7 +113,9 @@ eval.max_batches=128
 # transformer.n_layer=6 \
 # transformer.dim=256 \
 # transformer.n_head=4 \
-# transformer.use_fused_ops=True \
+# transformer.use_fused_ops=True
+
+#  \
 # optimizer.name=muon \
 # optimizer.muon_momentum=0.95
 
@@ -123,7 +125,7 @@ eval.max_batches=128
 # --config-path config \
 # --config-name bpe.yaml \
 # wandb.project="overfit-path" \
-# wandb.exp_name="1 _ p _ 0.01 muon" \
+# wandb.exp_name="25exp adam" \
 # \
 # train.batch_size=64 \
 # train.global_batch_size=64 \
@@ -141,7 +143,9 @@ eval.max_batches=128
 # path_transformer.dim=256 \
 # path_transformer.n_head=4 \
 # path_transformer.use_fused_ops=True \
-# path_transformer.damping=0.01 \
+# path_transformer.damping=0.01
+
+#  \
 # optimizer.name=muon \
 # optimizer.muon_momentum=0.95
 
@@ -220,7 +224,7 @@ eval.max_batches=128
 # --config-path config \
 # --config-name bpe.yaml \
 # wandb.project="fineweb-1b" \
-# wandb.exp_name="no_clip path 1_p_g_2 12L lr 1e-3 damp 1e-2 adam" \
+# wandb.exp_name="no_clip 25exp 12L lr 1e-3 damp 1e-2 adam" \
 # \
 # train.batch_size=32 \
 # train.global_batch_size=256 \
