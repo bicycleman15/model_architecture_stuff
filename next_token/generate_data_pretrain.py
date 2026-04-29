@@ -29,13 +29,13 @@ Usage::
 
     # default name (autoderived from params)
     python -m next_token.generate_data_pretrain --deg=5 --path_len=5 --num_nodes=100 \
-        --n_train=50_000_000 --n_test=20_000 --num_workers=16
+        --n_train=10 --n_test=10 --num_workers=16 --min_backtracks=0 --max_backtracks=0 --name temp
 
 # usage:
 python -m next_token.generate_data_pretrain \
---deg=7 --path_len=5 --num_nodes=100 \
---n_train=1_000_000 --n_test=20000 \
---num_workers=16 --name=star_7x5_1M
+--deg=5 --path_len=5 --num_nodes=100 \
+--n_train=5_000_000 --n_test=200_000 \
+--num_workers=16 --name=star_5x5_force_5M --min_backtracks=0 --max_backtracks=0
 
     # custom name (referenced as data.dataset=star_50M in pretrain.yaml)
     python -m next_token.generate_data_pretrain --deg=5 --path_len=5 --num_nodes=100 \
