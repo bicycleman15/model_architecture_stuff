@@ -162,14 +162,16 @@ def star_graph_cot(
     """Sample one CoT-with-backtracking star-graph instance.
 
     Trace shape (token ids returned in `trace_ids`):
-        [<think>, *decoy_1[:d_1], <backtrack>, ...,
-                  *decoy_N[:d_N], <backtrack>,
+        [<think>, source, *decoy_1[:d_1], <backtrack>, ...,
+                  source, *decoy_N[:d_N], <backtrack>,
                   *correct_path, </think>, *correct_path, <eos>]
 
     where ``N = n_back ~ Uniform{min_backtracks..max_backtracks}``, the
     ``n_back`` decoys are sampled uniformly without replacement from the
     ``deg - 1`` decoys, and per-decoy depths
-    ``d_i ~ Uniform{min_depth..max_depth}``.
+    ``d_i ~ Uniform{min_depth..max_depth}``. Every chain segment between
+    ``<think>``/``<backtrack>``/``</think>`` starts at ``source`` so that
+    decoys and the correct path share the same on-graph format.
 
     Defaults give "various levels": ``max_backtracks = deg - 1`` and
     ``min_depth = max_depth = path_len - 1``.
@@ -228,6 +230,10 @@ def star_graph_cot(
 
     trace_ids: list[int] = [tokenizer.THINK_OPEN]
     for decoy, d in zip(chosen_decoys, depths):
+        # Prepend ``source`` so every exploration chain starts at the same
+        # node as the correct path -- keeps the format of decoy and correct
+        # chains symmetric.
+        trace_ids.append(source)
         trace_ids.extend(decoy[:d])
         trace_ids.append(tokenizer.BACKTRACK)
     trace_ids.extend(path)
@@ -578,7 +584,10 @@ def write_cot_samples(
     Also writes a sibling ``meta.json`` next to ``out_path`` recording the
     resolved cot params and the worst-case ``max_target_len``::
 
-        2 + max_backtracks * (max_depth + 1) + 2 * path_len + 1   # +1 for <eos>
+        2 + max_backtracks * (max_depth + 2) + 2 * path_len + 1   # +1 for <eos>
+
+    where each decoy contributes ``1`` (source) + ``max_depth`` (chain) + ``1``
+    (``<backtrack>``) tokens.
 
     The bound is purely a function of the params, so calls with the same
     params from different splits (train/test) are idempotent w.r.t.
@@ -655,7 +664,7 @@ def write_cot_samples(
     np.cumsum(all_lens, dtype=np.int64, out=idx[1:])
     idx.tofile(idx_path)
 
-    upper_bound = 2 + max_backtracks * (max_depth + 1) + 2 * path_len + 1
+    upper_bound = 2 + max_backtracks * (max_depth + 2) + 2 * path_len + 1
     meta = {
         "deg": deg,
         "path_len": path_len,

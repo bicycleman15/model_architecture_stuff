@@ -93,8 +93,16 @@ def _save_checkpoint(
     save_dir = _resolve_ckpt_dir(cfg)
     save_dir.mkdir(parents=True, exist_ok=True)
     unwrapped = accelerator.unwrap_model(model)
+    # If NextLat is enabled, ``unwrapped`` is a NextLatWrapper -- save only the
+    # inner transformer's weights so GRPO can load the .pt as-is. The
+    # LatentDynamics MLP is a training-only artifact and is dropped.
+    inner = (
+        unwrapped.model
+        if hasattr(unwrapped, "dynamics") and hasattr(unwrapped, "model")
+        else unwrapped
+    )
     payload = {
-        "state_dict": unwrapped.state_dict(),
+        "state_dict": inner.state_dict(),
         "cfg": OmegaConf.to_container(cfg, resolve=True),
         "meta": meta,
         "tokenizer_num_nodes": int(meta["_resolved"]["num_nodes"]),
@@ -330,6 +338,8 @@ def _eval_cot(
     total_correct_per_pos = torch.zeros(path_len, dtype=torch.long)
     total_per_pos = torch.zeros(path_len, dtype=torch.long)
     total_loss = 0.0
+    total_loss_h = 0.0
+    total_loss_kl = 0.0
     total_loss_tokens = 0
     samples_log: list[dict[str, str | bool]] = []
 
@@ -345,9 +355,17 @@ def _eval_cot(
 
         input_ids, labels = make_cot_train_targets(full_ids, lengths, prefix_len)
         with accelerator.autocast():
-            loss, _ = model(input_ids, labels=labels)
+            loss, eval_stats = model(input_ids, labels=labels)
         n_tok = (labels != -100).sum().item()
-        total_loss += loss.item() * n_tok
+        # When NextLat is enabled, ``loss`` is the *total* objective; surface
+        # the CE component as ``val/forced_loss`` so the metric stays
+        # comparable across NextLat-on / NextLat-off runs.
+        if isinstance(eval_stats, dict) and "nextlat/loss_next" in eval_stats:
+            total_loss += float(eval_stats["nextlat/loss_next"]) * n_tok
+            total_loss_h += float(eval_stats.get("nextlat/loss_next_h", 0.0)) * n_tok
+            total_loss_kl += float(eval_stats.get("nextlat/loss_kl", 0.0)) * n_tok
+        else:
+            total_loss += loss.item() * n_tok
         total_loss_tokens += n_tok
 
         full_ids_d = full_ids.to(device)
@@ -489,6 +507,9 @@ def _eval_cot(
             )
     if total_loss_tokens > 0:
         metrics["val/forced_loss"] = total_loss / total_loss_tokens
+        if total_loss_h > 0.0 or total_loss_kl > 0.0:
+            metrics["val/forced_loss_h"] = total_loss_h / total_loss_tokens
+            metrics["val/forced_loss_kl"] = total_loss_kl / total_loss_tokens
     return metrics, samples_log
 
 
@@ -549,7 +570,45 @@ def main(cfg: DictConfig) -> None:
     # ------------------------------------------------------------ model + opt
     model = get_model(cfg, vocab_size=tokenizer.vocab_size, block_size=block_size)
     if accelerator.is_main_process:
-        log.info(f"Model: {cfg.model.name} | params: {_num_params(model):,}")
+        log.info(f"Base model: {cfg.model.name} | params: {_num_params(model):,}")
+
+    nextlat_enabled = (
+        cfg.get("nextlat", None) is not None and cfg.nextlat.get("enabled", False)
+    )
+    nextlat_horizon: int | None = None
+    if nextlat_enabled:
+        if cfg.model.name != "transformer":
+            raise ValueError(
+                f"nextlat.enabled is supported only for model.name=transformer, "
+                f"got '{cfg.model.name}'."
+            )
+        from next_token.nextlat import build_nextlat
+
+        nextlat_horizon = cfg.nextlat.get("horizon", None)
+        if nextlat_horizon is None:
+            nextlat_horizon = max(1, path_len - 2)
+        else:
+            nextlat_horizon = int(nextlat_horizon)
+        if accelerator.is_main_process:
+            log.info(
+                f"NextLat enabled: horizon={nextlat_horizon} "
+                f"lambda_h={cfg.nextlat.get('lambda_h', 1.0)} "
+                f"lambda_kl={cfg.nextlat.get('lambda_kl', 1.0)} "
+                f"n_hidden_layers={cfg.nextlat.get('n_hidden_layers', 2)} "
+                f"hidden_mult={cfg.nextlat.get('hidden_mult', 4)} "
+                f"stop_grad_target={cfg.nextlat.get('stop_grad_target', True)} "
+                f"mask_kl={cfg.nextlat.get('mask_kl', True)}"
+            )
+        model = build_nextlat(
+            model,
+            vocab_size=tokenizer.vocab_size,
+            cfg_nextlat=cfg.nextlat,
+            horizon=nextlat_horizon,
+        )
+        if accelerator.is_main_process:
+            log.info(f"NextLat-wrapped params: {_num_params(model):,}")
+
+    if accelerator.is_main_process:
         print(model)
 
     optimizer = torch.optim.AdamW(
@@ -602,6 +661,14 @@ def main(cfg: DictConfig) -> None:
         if int(cfg.get("batch_size", 256)) != 256:
             run_name += f"_bs{cfg.batch_size}"
         run_name += f"_T{cfg.eval.temperature:g}_seed{cfg.seed}"
+        if nextlat_enabled:
+            run_name += (
+                f"_nl_d{nextlat_horizon}"
+                f"_lh{cfg.nextlat.get('lambda_h', 1.0):g}"
+                f"_lkl{cfg.nextlat.get('lambda_kl', 1.0):g}"
+                f"_pL{cfg.nextlat.get('n_hidden_layers', 2)}"
+                f"_pM{cfg.nextlat.get('hidden_mult', 4)}"
+            )
         custom_name = cfg.logging.get("name", None)
         if custom_name:
             run_name = f"{custom_name} {run_name}"
@@ -708,7 +775,7 @@ def main(cfg: DictConfig) -> None:
             optimizer.zero_grad()
             input_ids, labels = make_cot_train_targets(full_ids, lengths, prefix_len)
             with accelerator.autocast():
-                loss, _ = model(input_ids, labels=labels)
+                loss, step_stats = model(input_ids, labels=labels)
             accelerator.backward(loss)
             clip_val = (
                 cfg.optimizer.grad_clip
@@ -724,24 +791,31 @@ def main(cfg: DictConfig) -> None:
             window_count += 1
 
             bar.update(1)
-            bar.set_postfix(
+            postfix = dict(
                 loss=f"{loss.item():.4f}",
                 grad_norm=f"{grad_norm_val:.2f}",
                 lr=f"{scheduler.get_last_lr()[0]:.5f}",
                 epoch=epoch,
             )
+            if step_stats and "nextlat/loss_next" in step_stats:
+                postfix["nl_ce"] = f"{step_stats['nextlat/loss_next']:.3f}"
+                postfix["nl_h"] = f"{step_stats['nextlat/loss_next_h']:.3f}"
+                postfix["nl_kl"] = f"{step_stats['nextlat/loss_kl']:.3f}"
+            bar.set_postfix(**postfix)
 
             if cfg.logging.wandb and accelerator.is_main_process:
-                wandb.log(
-                    {
-                        "train/loss": loss.item(),
-                        "train/grad_norm": grad_norm_val,
-                        "train/lr": scheduler.get_last_lr()[0],
-                        "train/epoch": epoch,
-                        "train/step": global_step,
-                    },
-                    step=global_step,
-                )
+                log_payload = {
+                    "train/loss": loss.item(),
+                    "train/grad_norm": grad_norm_val,
+                    "train/lr": scheduler.get_last_lr()[0],
+                    "train/epoch": epoch,
+                    "train/step": global_step,
+                }
+                if step_stats:
+                    for k, v in step_stats.items():
+                        if k.startswith("nextlat/"):
+                            log_payload[f"train/{k}"] = v
+                wandb.log(log_payload, step=global_step)
 
             is_last_step = global_step == total_steps
             if global_step % eval_interval == 0 or is_last_step:

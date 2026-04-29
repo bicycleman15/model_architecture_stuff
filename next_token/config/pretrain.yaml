@@ -45,7 +45,24 @@ checkpoint:
   save_final: true          # save state_dict + meta + cfg at end of training
   save_every_eval: false    # also dump a snapshot after every run_eval
 
-logging:
+# NextLat auxiliary objective (https://arxiv.org/abs/2511.05963).
+# When enabled, wraps the base transformer with `next_token.nextlat.NextLatWrapper`
+# which adds a residual MLP latent-dynamics model trained jointly with the
+# standard CE objective:
+#   L_total = L_next + lambda_h * L_next_h + lambda_kl * L_kl
+# Only supported for `model.name=transformer`. Saved checkpoints contain only
+# the inner transformer's weights so GRPO can load them as-is.
+nextlat:
+  enabled: false
+  horizon: null             # null -> max(1, path_len - 2) (paper Sec 4.3 default)
+  lambda_h: 1.0
+  lambda_kl: 1.0
+  n_hidden_layers: 2
+  hidden_mult: 4
+  stop_grad_target: true
+  mask_kl: true             # mask -100 positions out of the KL average
+
+logging:  
   wandb: true
   entity: "bicycleman15"
   project: next_token_pretrain
