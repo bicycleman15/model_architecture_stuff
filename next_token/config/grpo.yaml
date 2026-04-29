@@ -34,6 +34,15 @@ grpo:
   top_k: null
   max_new_tokens: null        # null -> use meta.max_target_len
   adv_eps: 1.0e-4
+  advantage: rloo             # grpo | rloo
+  # Length-penalty reward shaping from Arora & Zanette 2025
+  # (https://arxiv.org/abs/2502.04463). Multiplies the 0/1 correctness reward
+  # by `(1 - alpha * sigmoid((len - mu_correct) / (sigma_correct + eps_std)))`
+  # where mu/sigma are computed over the correct rollouts within the prompt's
+  # group. alpha=0 disables (current behaviour); paper recipe is ~0.1.
+  length_penalty:
+    alpha: 0.0
+    eps_std: 1.0e-6
 
 optimizer:
   lr: 1.0e-6
@@ -49,7 +58,7 @@ schedule:
   use_cosine: false
 
 eval:
-  every_steps: 100            # full eval every N optimizer steps (0 = off)
+  every_steps: 400            # full eval every N optimizer steps (0 = off)
   max_batches: 64
   temperature: 0.8
   top_k: null

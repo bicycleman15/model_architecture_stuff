@@ -43,43 +43,12 @@
 ### pretrain nextLat
 
 # WANDB_MODE=offline \
-accelerate launch \
---config-file accelerate.yaml --mixed_precision=bf16 --num_processes=1 \
--m next_token.pretrain \
-logging.project="pretrain-slow-think-fast" \
-logging.name="nextLat 1M" \
-\
-data.dataset="star_3x5_1M" \
-\
-model.n_layer=12 \
-model.dim=512 \
-model.n_head=8 \
-model=transformer \
-\
-batch_size=512 \
-schedule.warmup_steps=100 \
-optimizer.lr=5e-4 \
-optimizer.min_lr=5e-5 \
-optimizer.weight_decay=0.1 \
-schedule.epochs=1 \
-eval.every_pct=0.3 \
-eval.log_samples=20 \
-eval.max_batches=128 \
-\
-nextlat.enabled=true \
-nextlat.horizon=20 \
-nextlat.lambda_h=1.0 \
-nextlat.lambda_kl=1.0
-
-
-# WANDB_MODE=offline \
 # accelerate launch \
 # --config-file accelerate.yaml --mixed_precision=bf16 --num_processes=1 \
-# -m next_token.grpo \
-# logging.project="think-fast-RL" \
-# logging.name="grpo 1e-5 kl_0.05" \
+# -m next_token.pretrain \
+# logging.project="pretrain-slow-think-fast" \
+# logging.name="nextLat 1M" \
 # \
-# init.ckpt_path="/gpfs/scratch/jp7467/model_architecture_stuff/Results/next_token/pretrain/transformer/star_3x5_1M/2026-04-28/21-13-57/ckpt/final.pt" \
 # data.dataset="star_3x5_1M" \
 # \
 # model.n_layer=12 \
@@ -87,19 +56,91 @@ nextlat.lambda_kl=1.0
 # model.n_head=8 \
 # model=transformer \
 # \
-# batch_size=64 \
-# grpo.group_size=8 \
+# batch_size=512 \
+# schedule.warmup_steps=100 \
+# optimizer.lr=5e-4 \
+# optimizer.min_lr=5e-5 \
+# optimizer.weight_decay=0.1 \
+# schedule.epochs=1 \
+# eval.every_pct=0.3 \
+# eval.log_samples=20 \
+# eval.max_batches=128 \
+# \
+# nextlat.enabled=true \
+# nextlat.horizon=20 \
+# nextlat.lambda_h=1.0 \
+# nextlat.lambda_kl=1.0
+
+
+### post train
+# vanilla: /gpfs/scratch/jp7467/model_architecture_stuff/Results/next_token/pretrain/transformer/star_3x5_1M/2026-04-28/22-01-29/ckpt/final.pt
+
+# nextlat: /gpfs/scratch/jp7467/model_architecture_stuff/Results/next_token/pretrain/transformer/star_3x5_1M/2026-04-28/22-04-30/ckpt/final.pt
+
+
+# WANDB_MODE=offline \
+# accelerate launch \
+# --config-file accelerate.yaml --mixed_precision=bf16 --num_processes=1 \
+# -m next_token.grpo \
+# logging.project="think-fast-RL" \
+# logging.name="vanilla rloo alpha_0.2" \
+# \
+# init.ckpt_path="/gpfs/scratch/jp7467/model_architecture_stuff/Results/next_token/pretrain/transformer/star_3x5_1M/2026-04-28/22-01-29/ckpt/final.pt" \
+# data.dataset="star_3x5_1M" \
+# \
+# model.n_layer=12 \
+# model.dim=512 \
+# model.n_head=8 \
+# model=transformer \
+# \
+# batch_size=32 \
+# grpo.group_size=32 \
 # grpo.beta=0.05 \
 # grpo.temperature=0.8 \
+# grpo.length_penalty.alpha=0.2 \
 # \
 # schedule.steps=2000 \
 # schedule.warmup_steps=0 \
 # optimizer.lr=1e-5 \
 # optimizer.min_lr=1e-5 \
 # \
-# eval.every_steps=100 \
+# eval.every_steps=200 \
 # eval.max_batches=64 \
 # eval.log_samples=8
+
+
+accelerate launch \
+--config-file accelerate.yaml --mixed_precision=bf16 --num_processes=1 \
+-m next_token.grpo \
+logging.project="think-fast-RL" \
+logging.name="nextLat rloo alpha_0.2" \
+\
+init.ckpt_path="/gpfs/scratch/jp7467/model_architecture_stuff/Results/next_token/pretrain/transformer/star_3x5_1M/2026-04-28/22-04-30/ckpt/final.pt" \
+data.dataset="star_3x5_1M" \
+\
+model.n_layer=12 \
+model.dim=512 \
+model.n_head=8 \
+model=transformer \
+\
+batch_size=32 \
+grpo.group_size=32 \
+grpo.beta=0.05 \
+grpo.temperature=0.8 \
+grpo.length_penalty.alpha=0.2 \
+\
+schedule.steps=2000 \
+schedule.warmup_steps=0 \
+optimizer.lr=1e-5 \
+optimizer.min_lr=1e-5 \
+\
+eval.every_steps=200 \
+eval.max_batches=64 \
+eval.log_samples=8
+
+
+
+#####################
 
 
 # WANDB_MODE=offline \

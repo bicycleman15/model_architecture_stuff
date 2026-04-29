@@ -251,16 +251,76 @@ def _compute_rewards(
     return correct.float()
 
 
-def _group_advantage(
-    rewards: torch.Tensor, group_size: int, eps: float
-) -> torch.Tensor:
-    """Group-relative advantage: (r - mean(group)) / (std(group) + eps)."""
+def _apply_length_penalty(
+    rewards: torch.Tensor,
+    response_lens: torch.Tensor,
+    group_size: int,
+    alpha: float,
+    eps_std: float = 1e-6,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Arora & Zanette (2025) length penalty on top of 0/1 correctness reward.
+
+    Eq. 4 + 5 of https://arxiv.org/abs/2502.04463::
+
+        r(x, y) = 1{correct} * (1 - alpha * sigmoid((len(y) - mu) / sigma))
+
+    where ``mu``, ``sigma`` are computed *over correct rollouts* within the
+    prompt's group. Incorrect rollouts always stay at reward 0; correct ones
+    are squashed into ``[1 - alpha, 1]`` (since sigmoid is in (0, 1)).
+
+    Returns ``(shaped_rewards, length_factor)`` both flattened to (BG,). The
+    factor is ``f(len(y)) = sigmoid(...)`` and is logged for diagnostics; it is
+    zero everywhere when ``alpha <= 0`` so callers can avoid extra branches.
+    """
+    if alpha <= 0.0:
+        return rewards, torch.zeros_like(rewards)
+
     BG = rewards.shape[0]
     B = BG // group_size
     r = rewards.view(B, group_size)
-    mean = r.mean(dim=1, keepdim=True)
-    std = r.std(dim=1, keepdim=True, unbiased=False)
-    adv = (r - mean) / (std + eps)
+    L = response_lens.view(B, group_size).float()
+
+    correct = r > 0.5
+    correct_f = correct.float()
+    n_corr = correct_f.sum(dim=1, keepdim=True).clamp_min(1.0)        # (B, 1)
+    sum_L = (L * correct_f).sum(dim=1, keepdim=True)
+    mean = sum_L / n_corr                                              # mean over correct
+    var = ((L - mean) ** 2 * correct_f).sum(dim=1, keepdim=True) / n_corr
+    std = var.clamp_min(0.0).sqrt()
+
+    f = torch.sigmoid((L - mean) / (std + eps_std))                    # (B, G)
+    shaped = r * (1.0 - alpha * f)                                     # incorrect stay 0
+    return shaped.view(BG), f.view(BG)
+
+
+def _group_advantage(
+    rewards: torch.Tensor,
+    group_size: int,
+    eps: float,
+    *,
+    mode: str = "grpo",
+) -> torch.Tensor:
+    """Group baseline subtraction.
+
+    - ``mode='grpo'``: ``A_i = (r_i - mean(group)) / (std(group) + eps)``.
+    - ``mode='rloo'``: leave-one-out baseline (Kool et al. 2019; Arora &
+      Zanette 2025 Appendix J): ``A_i = r_i - mean(r_{j != i})
+      = (G * r_i - sum(r)) / (G - 1)``. Undefined for ``G == 1``.
+    """
+    BG = rewards.shape[0]
+    B = BG // group_size
+    r = rewards.view(B, group_size)
+    if mode == "grpo":
+        mean = r.mean(dim=1, keepdim=True)
+        std = r.std(dim=1, keepdim=True, unbiased=False)
+        adv = (r - mean) / (std + eps)
+    elif mode == "rloo":
+        if group_size < 2:
+            raise ValueError("RLOO advantage requires group_size >= 2")
+        denom = group_size - 1
+        adv = (group_size * r - r.sum(dim=1, keepdim=True)) / denom
+    else:
+        raise ValueError(f"Unknown advantage mode: {mode!r} (expected 'grpo' or 'rloo')")
     return adv.view(BG)
 
 
@@ -400,10 +460,17 @@ def main(cfg: DictConfig) -> None:
             f"prefix_len={prefix_len} max_new={max_new} "
             f"vocab={vocab_size} block_size={block_size}"
         )
+        _adv_mode_log = str(cfg.grpo.get("advantage", "grpo"))
+        _lp_alpha_log = (
+            float(cfg.grpo.length_penalty.alpha)
+            if cfg.grpo.get("length_penalty", None) is not None
+            else 0.0
+        )
         log.info(
             f"GRPO: G={cfg.grpo.group_size} beta={cfg.grpo.beta} "
             f"T={cfg.grpo.temperature} top_k={cfg.grpo.top_k} "
-            f"adv_eps={cfg.grpo.adv_eps}"
+            f"adv_eps={cfg.grpo.adv_eps} advantage={_adv_mode_log} "
+            f"length_penalty.alpha={_lp_alpha_log}"
         )
         log.info(
             f"Train prompts: {len(train_ds):,} | Test prompts: {len(test_ds):,}"
@@ -464,12 +531,22 @@ def main(cfg: DictConfig) -> None:
 
     # ---------------------------------------------------------------- wandb
     if cfg.logging.wandb and accelerator.is_main_process:
+        _adv_name = str(cfg.grpo.get("advantage", "grpo")).lower()
+        _lp_alpha_name = (
+            float(cfg.grpo.length_penalty.alpha)
+            if cfg.grpo.get("length_penalty", None) is not None
+            else 0.0
+        )
         run_name = (
             f"grpo_{cfg.model.name}_{cfg.data.dataset}"
             f"_G{cfg.grpo.group_size}_b{cfg.grpo.beta:g}"
             f"_lr{cfg.optimizer.lr:g}_T{cfg.grpo.temperature:g}"
             f"_seed{cfg.seed}"
         )
+        if _adv_name == "rloo":
+            run_name += "_rloo"
+        if _lp_alpha_name > 0.0:
+            run_name += f"_lp{_lp_alpha_name:g}"
         custom_name = cfg.logging.get("name", None)
         if custom_name:
             run_name = f"{custom_name} {run_name}"
@@ -486,6 +563,25 @@ def main(cfg: DictConfig) -> None:
     adv_eps = float(cfg.grpo.adv_eps)
     temperature = float(cfg.grpo.temperature)
     top_k = cfg.grpo.get("top_k", None)
+    adv_mode = str(cfg.grpo.get("advantage", "grpo")).lower()
+    if adv_mode not in {"grpo", "rloo"}:
+        raise ValueError(f"cfg.grpo.advantage must be 'grpo' or 'rloo', got {adv_mode!r}")
+    if adv_mode == "rloo" and G < 2:
+        raise ValueError("RLOO advantage requires cfg.grpo.group_size >= 2")
+    lp_cfg = cfg.grpo.get("length_penalty", None)
+    lp_alpha = float(lp_cfg.alpha) if lp_cfg is not None else 0.0
+    lp_eps_std = float(lp_cfg.eps_std) if lp_cfg is not None else 1e-6
+    if not (0.0 <= lp_alpha < 1.0):
+        raise ValueError(
+            f"cfg.grpo.length_penalty.alpha must be in [0, 1), got {lp_alpha}"
+        )
+    if (
+        cfg.logging.wandb
+        and accelerator.is_main_process
+        and wandb.run is not None
+    ):
+        wandb.run.summary["advantage_mode"] = adv_mode
+        wandb.run.summary["length_penalty_alpha"] = lp_alpha
     eos_id = tokenizer.EOS
     think_close_id = tokenizer.THINK_CLOSE
     think_open_id = tokenizer.THINK_OPEN
@@ -592,12 +688,19 @@ def main(cfg: DictConfig) -> None:
         )
         policy.train()
 
-        # --- reward + group advantage ---
-        rewards = _compute_rewards(
+        # --- reward + (optional) length-penalty + group advantage ---
+        rewards_raw = _compute_rewards(
             gen_ids, gt_paths_g,
             think_close_id=think_close_id, path_len=path_len,
         )                                                                         # (BG,)
-        advantages = _group_advantage(rewards, G, adv_eps).detach()               # (BG,)
+        # Response lengths for the length penalty + diagnostics. Includes the
+        # trailing <eos>; matches ``counts`` computed below from response_mask.
+        response_lens = response_mask.float().sum(dim=1)                          # (BG,)
+        rewards, len_factor = _apply_length_penalty(
+            rewards_raw, response_lens, G,
+            alpha=lp_alpha, eps_std=lp_eps_std,
+        )
+        advantages = _group_advantage(rewards, G, adv_eps, mode=adv_mode).detach()  # (BG,)
 
         # --- recompute log-probs under current policy + reference ---
         full_seq = torch.cat([prompt_g, gen_ids], dim=1)                          # (BG, prefix+max_new)
@@ -641,22 +744,27 @@ def main(cfg: DictConfig) -> None:
 
         # --- diagnostics ---
         with torch.no_grad():
+            rewards_raw_g = accelerator.gather(rewards_raw.detach())
             rewards_g = accelerator.gather(rewards.detach())
             adv_g = accelerator.gather(advantages.detach())
             counts_g = accelerator.gather(counts.detach())
+            len_factor_g = accelerator.gather(len_factor.detach())
             ent_mean = (entropy * mask_f).sum() / mask_f.sum().clamp_min(1.0)
             ent_g = accelerator.gather(ent_mean.detach().unsqueeze(0)).mean()
             kl_mean = kl_per.detach().mean()
             kl_g = accelerator.gather(kl_mean.unsqueeze(0)).mean()
 
-        reward_mean = rewards_g.mean().item()
-        reward_std = rewards_g.std(unbiased=False).item()
+        # Raw 0/1 correctness rate (= what current 'reward_mean' historically logged).
+        reward_raw_mean = rewards_raw_g.mean().item()
+        # Reward after length-penalty shaping (== raw when alpha == 0).
+        reward_shaped_mean = rewards_g.mean().item()
+        reward_shaped_std = rewards_g.std(unbiased=False).item()
         adv_abs_mean = adv_g.abs().mean().item()
-        # Response length, split by reward outcome.
+        # Response length, split by raw correctness.
         # ``counts`` already includes the trailing ``<eos>`` (response_mask is
         # True up to and including the EOS-emitting position). When no EOS is
         # produced for a row, counts == max_new for that row.
-        correct_mask = rewards_g > 0.5
+        correct_mask = rewards_raw_g > 0.5
         n_correct = int(correct_mask.sum().item())
         n_incorrect = int((~correct_mask).sum().item())
         resp_len_all = counts_g.float().mean().item()
@@ -668,23 +776,36 @@ def main(cfg: DictConfig) -> None:
             counts_g[~correct_mask].float().mean().item()
             if n_incorrect > 0 else float("nan")
         )
+        # Mean of f(len) over correct rollouts only (NaN when no correct).
+        # f is identically 0 when alpha == 0 (helper short-circuits).
+        if lp_alpha > 0.0 and n_correct > 0:
+            lp_factor_correct = len_factor_g[correct_mask].float().mean().item()
+        else:
+            lp_factor_correct = float("nan")
 
         bar.update(1)
         if accelerator.is_main_process:
-            bar.set_postfix(
-                loss=f"{loss.item():.4f}",
-                r=f"{reward_mean:.3f}",
-                kl=f"{kl_g.item():.4f}",
-                len=f"{resp_len_all:.1f}",
-                gn=f"{grad_norm_val:.2f}",
-                lr=f"{scheduler.get_last_lr()[0]:.2e}",
-            )
+            postfix = {
+                "loss": f"{loss.item():.4f}",
+                "r_raw": f"{reward_raw_mean:.3f}",
+                "kl": f"{kl_g.item():.4f}",
+                "len": f"{resp_len_all:.1f}",
+                "gn": f"{grad_norm_val:.2f}",
+                "lr": f"{scheduler.get_last_lr()[0]:.2e}",
+            }
+            if lp_alpha > 0.0:
+                postfix["r_sh"] = f"{reward_shaped_mean:.3f}"
+            bar.set_postfix(postfix)
 
         if cfg.logging.wandb and accelerator.is_main_process:
             payload = {
                 "train/loss": loss.item(),
-                "train/reward_mean": reward_mean,
-                "train/reward_std": reward_std,
+                # Raw 0/1 correctness; matches the value historically logged as
+                # train/reward_mean and is the right metric for accuracy curves.
+                "train/reward_raw_mean": reward_raw_mean,
+                # Shaped reward after the length-penalty multiplier.
+                "train/reward_mean": reward_shaped_mean,
+                "train/reward_std": reward_shaped_std,
                 "train/adv_abs_mean": adv_abs_mean,
                 "train/kl": kl_g.item(),
                 "train/entropy": ent_g.item(),
@@ -699,6 +820,8 @@ def main(cfg: DictConfig) -> None:
                 payload["train/response_len_correct"] = resp_len_correct
             if n_incorrect > 0:
                 payload["train/response_len_incorrect"] = resp_len_incorrect
+            if lp_alpha > 0.0 and not math.isnan(lp_factor_correct):
+                payload["train/length_penalty_f_mean_correct"] = lp_factor_correct
             wandb.log(payload, step=global_step)
 
         if eval_every > 0 and (
