@@ -40,6 +40,11 @@ eval:
   top_k: null               # optional top-k filter (null = off)
   log_samples: 4            # number of decoded sampled traces to print/log per eval (0 = off)
 
+checkpoint:
+  save_dir: null            # null -> ${hydra.run.dir}/ckpt
+  save_final: true          # save state_dict + meta + cfg at end of training
+  save_every_eval: false    # also dump a snapshot after every run_eval
+
 logging:
   wandb: true
   entity: "bicycleman15"

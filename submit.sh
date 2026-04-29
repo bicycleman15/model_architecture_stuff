@@ -19,11 +19,13 @@ accelerate launch \
 --config-file accelerate.yaml --mixed_precision=bf16 --num_processes=1 \
 -m next_token.pretrain \
 logging.project="pretrain-slow-think-fast" \
-logging.name="test" \
+logging.name="pretrain 1M" \
 \
-data.dataset="star_5M" \
+data.dataset="star_3x5_1M" \
 \
 model.n_layer=12 \
+model.dim=512 \
+model.n_head=8 \
 model=transformer \
 \
 batch_size=512 \
@@ -35,6 +37,36 @@ schedule.epochs=1 \
 eval.every_pct=0.1 \
 eval.log_samples=20 \
 eval.max_batches=128
+
+
+WANDB_MODE=offline \
+accelerate launch \
+--config-file accelerate.yaml --mixed_precision=bf16 --num_processes=1 \
+-m next_token.grpo \
+logging.project="think-fast-RL" \
+logging.name="test grpo" \
+\
+init.ckpt_path="/gpfs/scratch/jp7467/model_architecture_stuff/Results/next_token/pretrain/transformer/star_3x5_1M/2026-04-28/21-13-57/ckpt/final.pt" \
+data.dataset="star_3x5_1M" \
+\
+model.n_layer=12 \
+model.dim=512 \
+model.n_head=8 \
+model=transformer \
+\
+batch_size=64 \
+grpo.group_size=8 \
+grpo.beta=0 \
+grpo.temperature=0.8 \
+\
+schedule.steps=2000 \
+schedule.warmup_steps=0 \
+optimizer.lr=1e-6 \
+optimizer.min_lr=1e-6 \
+\
+eval.every_steps=100 \
+eval.max_batches=64 \
+eval.log_samples=8
 
 
 # WANDB_MODE=offline \

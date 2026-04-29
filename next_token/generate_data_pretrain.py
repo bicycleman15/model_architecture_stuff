@@ -33,9 +33,9 @@ Usage::
 
 # usage:
 python -m next_token.generate_data_pretrain \
---deg=5 --path_len=5 --num_nodes=100 \
---n_train=5_000_000 --n_test=20000 \
---num_workers=16 --name=star_5M
+--deg=3 --path_len=5 --num_nodes=100 \
+--n_train=1_000_000 --n_test=20000 \
+--num_workers=16 --name=star_3x5_1M
 
     # custom name (referenced as data.dataset=star_50M in pretrain.yaml)
     python -m next_token.generate_data_pretrain --deg=5 --path_len=5 --num_nodes=100 \

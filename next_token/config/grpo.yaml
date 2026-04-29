@@ -1,0 +1,69 @@
+defaults:
+  - model: transformer        # MUST match the architecture of the loaded checkpoint
+  - _self_
+
+# GRPO fine-tuning on the CoT pre-trained model. Sparse 0/1 reward per rollout
+# = does the path emitted after `</think>` match the ground-truth path. With a
+# single inner update per rollout the standard GRPO objective collapses to
+# REINFORCE-with-group-baseline; an optional KL term to a frozen reference is
+# applied via `grpo.beta`.
+
+seed: 42
+batch_size: 16                # number of distinct prompts per optimizer step
+mixed_precision: bf16
+
+data:
+  # Folder name under `data_dir` produced by `next_token.generate_data_pretrain`.
+  # All graph/CoT params are read from `<dataset>/meta.json`.
+  dataset: deg5_path5_nodes100_cot_b0-4_d4-4
+  data_dir: next_token/data
+  n_train: null
+  n_test: null
+
+init:
+  # Path to a checkpoint produced by `next_token.pretrain` (`final.pt`).
+  ckpt_path: ???
+  # Optional separate reference checkpoint; null -> reuse `ckpt_path`.
+  ref_ckpt_path: null
+  strict: true                # state_dict load strictness
+
+grpo:
+  group_size: 8               # G rollouts per prompt
+  beta: 0.04                  # KL coefficient; 0.0 disables KL & reference forward
+  temperature: 1.0
+  top_k: null
+  max_new_tokens: null        # null -> use meta.max_target_len
+  adv_eps: 1.0e-4
+
+optimizer:
+  lr: 1.0e-6
+  min_lr: 1.0e-6
+  betas: [0.9, 0.95]
+  eps: 1.0e-8
+  weight_decay: 0.0
+  grad_clip: 1.0
+
+schedule:
+  steps: 2000                 # total optimizer steps
+  warmup_steps: 0
+  use_cosine: false
+
+eval:
+  every_steps: 100            # full eval every N optimizer steps (0 = off)
+  max_batches: 64
+  temperature: 0.8
+  top_k: null
+  log_samples: 4
+
+logging:
+  wandb: true
+  entity: bicycleman15
+  project: next_token_grpo
+  name: ""
+
+hydra:
+  run:
+    dir: ${hydra:runtime.cwd}/Results/next_token/grpo/${model.name}/${data.dataset}/${now:%Y-%m-%d}/${now:%H-%M-%S}
+  sweep:
+    dir: ${hydra:runtime.cwd}/Results/next_token/grpo/${model.name}/${data.dataset}/${now:%Y-%m-%d}
+    subdir: ${now:%H-%M-%S}_${hydra.job.num}

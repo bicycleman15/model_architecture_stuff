@@ -55,6 +55,66 @@ def _num_params(model) -> int:
     return sum(p.numel() for p in model.parameters() if p.requires_grad)
 
 
+def _resolve_ckpt_dir(cfg: DictConfig) -> Path:
+    """Resolve the checkpoint output directory.
+
+    If `cfg.checkpoint.save_dir` is null, defaults to ``${hydra.run.dir}/ckpt``
+    so checkpoints land alongside the hydra run logs.
+    """
+    if cfg.checkpoint.get("save_dir") is None:
+        run_dir = Path(hydra.core.hydra_config.HydraConfig.get().runtime.output_dir)
+        return run_dir / "ckpt"
+    p = Path(cfg.checkpoint.save_dir)
+    if not p.is_absolute():
+        p = Path(hydra.core.hydra_config.HydraConfig.get().runtime.cwd) / p
+    return p
+
+
+def _save_checkpoint(
+    accelerator: Accelerator,
+    model,
+    cfg: DictConfig,
+    meta: dict,
+    tokenizer: NumeralTokenizer,
+    *,
+    block_size: int,
+    prefix_len: int,
+    tag: str,
+) -> None:
+    """Save a single ``.pt`` with everything needed to rebuild the model.
+
+    Layout:
+        {save_dir}/
+            {tag}.pt          # state_dict + meta + (resolved) cfg + bookkeeping
+            config.yaml       # human-readable cfg snapshot (only written once)
+    """
+    if not accelerator.is_main_process:
+        return
+    save_dir = _resolve_ckpt_dir(cfg)
+    save_dir.mkdir(parents=True, exist_ok=True)
+    unwrapped = accelerator.unwrap_model(model)
+    payload = {
+        "state_dict": unwrapped.state_dict(),
+        "cfg": OmegaConf.to_container(cfg, resolve=True),
+        "meta": meta,
+        "tokenizer_num_nodes": int(meta["_resolved"]["num_nodes"]),
+        "vocab_size": int(tokenizer.vocab_size),
+        "block_size": int(block_size),
+        "prefix_len": int(prefix_len),
+        "max_target_len": int(meta["max_target_len"]),
+        "path_len": int(meta["_resolved"]["path_len"]),
+        "deg": int(meta["_resolved"]["deg"]),
+        "num_nodes": int(meta["_resolved"]["num_nodes"]),
+    }
+    out_path = save_dir / f"{tag}.pt"
+    torch.save(payload, out_path)
+    cfg_path = save_dir / "config.yaml"
+    if not cfg_path.exists():
+        with open(cfg_path, "w") as f:
+            OmegaConf.save(cfg, f)
+    log.info(f"Saved checkpoint -> {out_path}")
+
+
 def _build_datasets(cfg: DictConfig):
     """Resolve a dataset folder, read its ``meta.json`` and build the datasets.
 
@@ -144,6 +204,89 @@ def _sample_next(
     return torch.multinomial(probs, num_samples=1).squeeze(-1)
 
 
+def _check_cot_chains(
+    gen_row: torch.Tensor,
+    prefix_row: torch.Tensor,
+    *,
+    n_edges: int,
+    think_open_id: int,
+    think_close_id: int,
+    backtrack_id: int,
+) -> tuple[bool, bool]:
+    """Validate the ``<think> ... </think>`` region against the star graph.
+
+    Returns ``(chains_valid, ends_at_goal)`` for a single sequence:
+
+    * ``chains_valid``: every chain segment (delimited by ``<think>``,
+      ``<backtrack>``, ``</think>``) is a valid path starting from ``source``
+      following directed edges of the graph.
+    * ``ends_at_goal``: ``chains_valid`` AND the final segment terminates at
+      ``goal``.
+
+    The prefix layout is ``a0 b0 [PIPE a_i b_i]* SLASH source goal EQ``, so
+    ``source = prefix[-3]`` and ``goal = prefix[-2]``. The ``i``-th edge sits
+    at ``(prefix[3*i], prefix[3*i+1])``.
+
+    Note: the training format is asymmetric -- decoy chains exclude ``source``
+    while the correct chain (the one immediately before ``</think>``) includes
+    it as the first token. We strip a leading ``source`` from each segment
+    before walking, so both formats validate identically.
+    """
+    edges = [
+        (int(prefix_row[3 * i].item()), int(prefix_row[3 * i + 1].item()))
+        for i in range(n_edges)
+    ]
+    source = int(prefix_row[3 * n_edges].item())
+    goal = int(prefix_row[3 * n_edges + 1].item())
+
+    src_nbrs: set[int] = set()
+    adj: dict[int, int] = {}
+    for a, b in edges:
+        if a == source:
+            src_nbrs.add(b)
+        else:
+            adj[a] = b
+
+    L = gen_row.size(0)
+    if L == 0 or int(gen_row[0].item()) != think_open_id:
+        return False, False
+    close_pos = -1
+    for i in range(1, L):
+        if int(gen_row[i].item()) == think_close_id:
+            close_pos = i
+            break
+    if close_pos < 0:
+        return False, False
+
+    inside = gen_row[1:close_pos].tolist()
+    segments: list[list[int]] = []
+    cur: list[int] = []
+    for t in inside:
+        if t == backtrack_id:
+            segments.append(cur)
+            cur = []
+        else:
+            cur.append(t)
+    segments.append(cur)
+
+    last_seg_stripped: list[int] = []
+    for k, seg in enumerate(segments):
+        if seg and seg[0] == source:
+            seg = seg[1:]
+        if not seg:
+            return False, False
+        if seg[0] not in src_nbrs:
+            return False, False
+        for a, b in zip(seg, seg[1:]):
+            if adj.get(a) != b:
+                return False, False
+        if k == len(segments) - 1:
+            last_seg_stripped = seg
+
+    ends_at_goal = bool(last_seg_stripped) and last_seg_stripped[-1] == goal
+    return True, ends_at_goal
+
+
 @torch.no_grad()
 def _eval_cot(
     model,
@@ -152,9 +295,12 @@ def _eval_cot(
     *,
     prefix_len: int,
     path_len: int,
+    deg: int,
     max_target_len: int,
     pad_id: int,
+    think_open_id: int,
     think_close_id: int,
+    backtrack_id: int,
     eos_id: int,
     temperature: float,
     top_k: int | None,
@@ -179,12 +325,15 @@ def _eval_cot(
     total_seq = 0
     total_no_close = 0
     total_eos_ok = 0
+    total_cot_chains_valid = 0
+    total_cot_ends_at_goal = 0
     total_correct_per_pos = torch.zeros(path_len, dtype=torch.long)
     total_per_pos = torch.zeros(path_len, dtype=torch.long)
     total_loss = 0.0
     total_loss_tokens = 0
     samples_log: list[dict[str, str | bool]] = []
 
+    n_edges = (path_len - 1) * deg
     device = accelerator.device
 
     for i, (full_ids, lengths) in enumerate(
@@ -227,9 +376,11 @@ def _eval_cot(
 
         gen = seq[:, prefix_len:]                                                # (B, max_target_len)
 
-        # GT path: last path_len un-padded tokens of full_ids per row.
+        # GT path: the `path_len` tokens immediately before the trailing
+        # `<eos>` (the trace is ``..., correct_path, <eos>`` so they live at
+        # ``[length - path_len - 1 : length - 1]``).
         ar = torch.arange(path_len, device=device)
-        gather_idx = (lengths_d.unsqueeze(1) - path_len + ar).clamp_min(0)         # (B, path_len)
+        gather_idx = (lengths_d.unsqueeze(1) - path_len - 1 + ar).clamp_min(0)     # (B, path_len)
         gt = full_ids_d.gather(1, gather_idx)                                      # (B, path_len)
 
         # Predicted path: next path_len tokens after the first </think> in gen.
@@ -237,32 +388,49 @@ def _eval_cot(
         pred = torch.full((B, path_len), pad_id, dtype=torch.long, device=device)
         valid = torch.zeros(B, dtype=torch.bool, device=device)
         eos_ok = torch.zeros(B, dtype=torch.bool, device=device)
+        cot_chains_valid = torch.zeros(B, dtype=torch.bool, device=device)
+        cot_ends_at_goal = torch.zeros(B, dtype=torch.bool, device=device)
         L_gen = gen.size(1)
+        gen_cpu_inner = gen.cpu()
+        prefix_cpu_inner = full_ids_d[:, :prefix_len].cpu()
         for b in range(B):
             row = gen[b]
             close_pos = (row == think_close_id).nonzero(as_tuple=False)
-            if close_pos.numel() == 0:
-                continue
-            start = int(close_pos[0].item()) + 1
-            end = start + path_len
-            if end > L_gen:
-                continue
-            pred[b] = row[start:end]
-            valid[b] = True
-            if end < L_gen and row[end].item() == eos_id:
-                eos_ok[b] = True
+            if close_pos.numel() != 0:
+                start = int(close_pos[0].item()) + 1
+                end = start + path_len
+                if end <= L_gen:
+                    pred[b] = row[start:end]
+                    valid[b] = True
+                    if end < L_gen and row[end].item() == eos_id:
+                        eos_ok[b] = True
+
+            chains_ok, goal_ok = _check_cot_chains(
+                gen_cpu_inner[b],
+                prefix_cpu_inner[b],
+                n_edges=n_edges,
+                think_open_id=think_open_id,
+                think_close_id=think_close_id,
+                backtrack_id=backtrack_id,
+            )
+            cot_chains_valid[b] = chains_ok
+            cot_ends_at_goal[b] = goal_ok
 
         correct = pred.eq(gt) & valid.unsqueeze(1)                                # (B, path_len)
         seq_ok = correct.all(dim=1) & valid
 
-        correct_g, valid_g, seq_ok_g, eos_ok_g = accelerator.gather_for_metrics(
-            (correct, valid, seq_ok, eos_ok)
+        correct_g, valid_g, seq_ok_g, eos_ok_g, cot_v_g, cot_g_g = (
+            accelerator.gather_for_metrics(
+                (correct, valid, seq_ok, eos_ok, cot_chains_valid, cot_ends_at_goal)
+            )
         )
         total_correct_per_pos += correct_g.sum(dim=0).cpu().long()
         total_per_pos += correct_g.shape[0]
         total_correct_seq += seq_ok_g.sum().item()
         total_no_close += (~valid_g).sum().item()
         total_eos_ok += eos_ok_g.sum().item()
+        total_cot_chains_valid += cot_v_g.sum().item()
+        total_cot_ends_at_goal += cot_g_g.sum().item()
         total_seq += correct_g.shape[0]
 
         # Capture a few decoded samples from the very first batch (main process).
@@ -281,6 +449,8 @@ def _eval_cot(
             valid_cpu = valid.cpu()
             seq_ok_cpu = seq_ok.cpu()
             eos_ok_cpu = eos_ok.cpu()
+            cot_v_cpu = cot_chains_valid.cpu()
+            cot_g_cpu = cot_ends_at_goal.cpu()
             for b in range(n_log):
                 L_b = int(lengths_cpu[b].item())
                 prefix_str = tokenizer.decode(full_cpu[b, :prefix_len].tolist())
@@ -301,6 +471,8 @@ def _eval_cot(
                         "pred_path": pred_path_str,
                         "correct": bool(seq_ok_cpu[b].item()),
                         "eos_ok": bool(eos_ok_cpu[b].item()),
+                        "cot_valid": bool(cot_v_cpu[b].item()),
+                        "cot_ends_at_goal": bool(cot_g_cpu[b].item()),
                     }
                 )
 
@@ -309,6 +481,8 @@ def _eval_cot(
         metrics["val/sample_seq_acc"] = total_correct_seq / total_seq
         metrics["val/no_think_close_rate"] = total_no_close / total_seq
         metrics["val/eos_correct_pos_rate"] = total_eos_ok / total_seq
+        metrics["val/cot_chains_valid_rate"] = total_cot_chains_valid / total_seq
+        metrics["val/cot_ends_at_goal_rate"] = total_cot_ends_at_goal / total_seq
         for j in range(path_len):
             metrics[f"val/sample_token_{j}"] = (
                 total_correct_per_pos[j].item() / max(1, total_per_pos[j].item())
@@ -458,9 +632,12 @@ def main(cfg: DictConfig) -> None:
             accelerator,
             prefix_len=prefix_len,
             path_len=path_len,
+            deg=deg,
             max_target_len=max_target_len,
             pad_id=tokenizer.DUMMY,
+            think_open_id=tokenizer.THINK_OPEN,
             think_close_id=tokenizer.THINK_CLOSE,
+            backtrack_id=tokenizer.BACKTRACK,
             eos_id=tokenizer.EOS,
             temperature=float(cfg.eval.temperature),
             top_k=cfg.eval.get("top_k", None),
@@ -485,17 +662,19 @@ def main(cfg: DictConfig) -> None:
                 f"sample_seq={metrics.get('val/sample_seq_acc', float('nan')):.4f} "
                 f"no_close={metrics.get('val/no_think_close_rate', float('nan')):.3f} "
                 f"eos_pos={metrics.get('val/eos_correct_pos_rate', float('nan')):.3f} "
+                f"cot_valid={metrics.get('val/cot_chains_valid_rate', float('nan')):.3f} "
+                f"cot_goal={metrics.get('val/cot_ends_at_goal_rate', float('nan')):.3f} "
                 f"{tok_str}"
             )
             for k, s in enumerate(samples_log):
                 log.info(
-                    "  sample[%d] correct=%s eos_ok=%s\n"
+                    "  sample[%d] correct=%s eos_ok=%s cot_valid=%s cot_goal=%s\n"
                     "    prefix:    %s\n"
                     "    gt_trace:  %s\n"
                     "    gen:       %s\n"
                     "    gt_path:   %s\n"
                     "    pred_path: %s",
-                    k, s["correct"], s["eos_ok"],
+                    k, s["correct"], s["eos_ok"], s["cot_valid"], s["cot_ends_at_goal"],
                     s["prefix"], s["gt_trace"], s["gen"], s["gt_path"], s["pred_path"],
                 )
             if cfg.logging.wandb:
@@ -504,12 +683,14 @@ def main(cfg: DictConfig) -> None:
                     table = wandb.Table(
                         columns=[
                             "step", "idx", "correct", "eos_ok",
+                            "cot_valid", "cot_ends_at_goal",
                             "gt_path", "pred_path", "gen", "gt_trace",
                         ]
                     )
                     for k, s in enumerate(samples_log):
                         table.add_data(
                             step, k, s["correct"], s["eos_ok"],
+                            s["cot_valid"], s["cot_ends_at_goal"],
                             s["gt_path"], s["pred_path"], s["gen"], s["gt_trace"],
                         )
                     wandb.log({"val/samples": table}, step=step)
@@ -567,8 +748,20 @@ def main(cfg: DictConfig) -> None:
                 run_eval(step=global_step, epoch=epoch)
                 window_loss = 0.0
                 window_count = 0
+                if cfg.checkpoint.get("save_every_eval", False):
+                    _save_checkpoint(
+                        accelerator, model, cfg, meta, tokenizer,
+                        block_size=block_size, prefix_len=prefix_len,
+                        tag=f"step_{global_step}",
+                    )
 
     bar.close()
+
+    if cfg.checkpoint.get("save_final", True):
+        _save_checkpoint(
+            accelerator, model, cfg, meta, tokenizer,
+            block_size=block_size, prefix_len=prefix_len, tag="final",
+        )
 
     if cfg.logging.wandb and accelerator.is_main_process:
         wandb.finish()
