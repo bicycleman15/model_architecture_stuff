@@ -42,9 +42,16 @@ python -m next_token.generate_data_pretrain \
 python -m next_token.generate_data_pretrain \
 --deg=5 --path_len=5 --num_nodes=100 \
 --n_train=3_000_000 --n_test=20_000 --num_workers=16 \
---name=star_5x5_mixed_3M \
+--name=star_5x5_heavy_0.9_0.05 \
 --min_backtracks=0 --max_backtracks=4 \
---backtrack_weights=0.7,0.1,0.1,0.05,0.05 --overwrite
+--backtrack_weights=0.9,0.05,0.02,0.02,0.01 --overwrite
+
+python -m next_token.generate_data_pretrain \
+--deg=5 --path_len=5 --num_nodes=100 \
+--n_train=100_000 --n_test=20_000 --num_workers=16 \
+--name=star_5x5_ft_equal \
+--min_backtracks=0 --max_backtracks=4 \
+--backtrack_weights=0.1,0.1,0.1,0.1,0.1 --overwrite
 
     # custom name (referenced as data.dataset=star_50M in pretrain.yaml)
     python -m next_token.generate_data_pretrain --deg=5 --path_len=5 --num_nodes=100 \

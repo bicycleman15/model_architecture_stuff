@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH --job-name=path
+#SBATCH --job-name=nextlat
 #SBATCH --open-mode=append
 #SBATCH --output=slurm_logs/%j_%x.out
 #SBATCH --error=slurm_logs/%j_%x.err
@@ -14,52 +14,141 @@
 # use `sbatch submit.slurm`
 # note we do not have WANDB_MODE=offline here because we are submitting the job to the cluster
 
-### pretrain vanilla
+### finetune ########################################################
+
+# dataset: star_5x5_ft_no_backtrack
+# dataset: star_5x5_ft_one_backtrack_50_50
+# star_5x5_ft_two_backtrack_30_30_30
+# star_5x5_ft_equal
+
+# vanilla: Results/next_token/pretrain/transformer/star_5x5_heavy_0.9_0.05/2026-04-29/12-00-33/ckpt/final.pt
+# nextlat: Results/next_token/pretrain/transformer/star_5x5_heavy_0.9_0.05/2026-04-29/11-50-12/ckpt/final.pt
 
 # WANDB_MODE=offline \
-accelerate launch \
---config-file accelerate.yaml --mixed_precision=bf16 --num_processes=1 \
--m next_token.pretrain \
-logging.project="pretrain-slow-think-fast" \
-logging.name="vanilla lr 5e-4 star_5x5_mixed_3M" \
+accelerate launch --config-file accelerate.yaml --mixed_precision=bf16 --num_processes=1 \
+-m next_token.finetune \
 \
-data.dataset="star_5x5_mixed_3M" \
+logging.name="vanilla star_5x5_ft_no_backtrack" \
 \
-model.n_layer=12 \
-model.dim=512 \
-model.n_head=8 \
-model=transformer \
-\
+init.ckpt_path="Results/next_token/pretrain/transformer/star_5x5_heavy_0.9_0.05/2026-04-29/12-00-33/ckpt/final.pt" \
+data.dataset=star_5x5_ft_no_backtrack \
+model.dim=768 model.n_layer=12 model.n_head=12 \
 batch_size=512 \
 schedule.warmup_steps=100 \
-optimizer.lr=5e-4 \
-optimizer.min_lr=5e-5 \
+optimizer.lr=1e-6 \
+optimizer.min_lr=1e-6 \
 optimizer.weight_decay=0.1 \
 schedule.epochs=1 \
-eval.every_pct=0.2 \
+eval.every_pct=0.3 \
 eval.log_samples=20 \
 eval.max_batches=25
 
-### pretrain nextLat
+accelerate launch --config-file accelerate.yaml --mixed_precision=bf16 --num_processes=1 \
+-m next_token.finetune \
+\
+logging.name="vanilla star_5x5_ft_two_backtrack_30_30_30" \
+\
+init.ckpt_path="Results/next_token/pretrain/transformer/star_5x5_heavy_0.9_0.05/2026-04-29/12-00-33/ckpt/final.pt" \
+data.dataset=star_5x5_ft_two_backtrack_30_30_30 \
+model.dim=768 model.n_layer=12 model.n_head=12 \
+batch_size=512 \
+schedule.warmup_steps=100 \
+optimizer.lr=1e-6 \
+optimizer.min_lr=1e-6 \
+optimizer.weight_decay=0.1 \
+schedule.epochs=1 \
+eval.every_pct=0.3 \
+eval.log_samples=20 \
+eval.max_batches=25
+
+accelerate launch --config-file accelerate.yaml --mixed_precision=bf16 --num_processes=1 \
+-m next_token.finetune \
+\
+logging.name="vanilla star_5x5_ft_one_backtrack_50_50" \
+\
+init.ckpt_path="Results/next_token/pretrain/transformer/star_5x5_heavy_0.9_0.05/2026-04-29/12-00-33/ckpt/final.pt" \
+data.dataset=star_5x5_ft_one_backtrack_50_50 \
+model.dim=768 model.n_layer=12 model.n_head=12 \
+batch_size=512 \
+schedule.warmup_steps=100 \
+optimizer.lr=1e-6 \
+optimizer.min_lr=1e-6 \
+optimizer.weight_decay=0.1 \
+schedule.epochs=1 \
+eval.every_pct=0.3 \
+eval.log_samples=20 \
+eval.max_batches=25
+
+accelerate launch --config-file accelerate.yaml --mixed_precision=bf16 --num_processes=1 \
+-m next_token.finetune \
+\
+logging.name="vanilla star_5x5_ft_equal" \
+\
+init.ckpt_path="Results/next_token/pretrain/transformer/star_5x5_heavy_0.9_0.05/2026-04-29/12-00-33/ckpt/final.pt" \
+data.dataset=star_5x5_ft_equal \
+model.dim=768 model.n_layer=12 model.n_head=12 \
+batch_size=512 \
+schedule.warmup_steps=100 \
+optimizer.lr=1e-6 \
+optimizer.min_lr=1e-6 \
+optimizer.weight_decay=0.1 \
+schedule.epochs=1 \
+eval.every_pct=0.3 \
+eval.log_samples=20 \
+eval.max_batches=25
+
+
+########################################################
+
+### pretrain vanilla
 
 # WANDB_MODE=offline \
 # accelerate launch \
 # --config-file accelerate.yaml --mixed_precision=bf16 --num_processes=1 \
 # -m next_token.pretrain \
 # logging.project="pretrain-slow-think-fast" \
-# logging.name="nextLat star_5x5_mixed_3M" \
+# logging.name="heavy vanilla 768D no_L1 horizon_10 lr_5e-4" \
 # \
-# data.dataset="star_5x5_mixed_3M" \
+# data.dataset="star_5x5_heavy_0.9_0.05" \
 # \
 # model.n_layer=12 \
-# model.dim=512 \
-# model.n_head=8 \
+# model.dim=768 \
+# model.n_head=12 \
 # model=transformer \
 # \
 # batch_size=512 \
 # schedule.warmup_steps=100 \
-# optimizer.lr=1e-3 \
-# optimizer.min_lr=1e-4 \
+# optimizer.lr=1e-4 \
+# optimizer.min_lr=1e-5 \
+# optimizer.weight_decay=0.1 \
+# schedule.epochs=1 \
+# eval.every_pct=0.1 \
+# eval.log_samples=20 \
+# eval.max_batches=25
+
+### pretrain nextLat
+
+# star_5x5_heavy_mixed_3M
+# sanity
+
+# WANDB_MODE=offline \
+# accelerate launch \
+# --config-file accelerate.yaml --mixed_precision=bf16 --num_processes=1 \
+# -m next_token.pretrain \
+# logging.project="pretrain-slow-think-fast" \
+# logging.name="heavy nextLat 768D no_L1 horizon_10 lr_5e-4" \
+# \
+# data.dataset="star_5x5_heavy_0.9_0.05" \
+# \
+# model.n_layer=12 \
+# model.dim=768 \
+# model.n_head=12 \
+# model=transformer \
+# \
+# batch_size=512 \
+# schedule.warmup_steps=100 \
+# optimizer.lr=1e-4 \
+# optimizer.min_lr=1e-5 \
 # optimizer.weight_decay=0.1 \
 # schedule.epochs=1 \
 # eval.every_pct=0.1 \
@@ -67,8 +156,8 @@ eval.max_batches=25
 # eval.max_batches=25 \
 # \
 # nextlat.enabled=true \
-# nextlat.horizon=30 \
-# nextlat.lambda_h=1.0 \
+# nextlat.horizon=10 \
+# nextlat.lambda_h=0 \
 # nextlat.lambda_kl=1.0
 
 

@@ -341,6 +341,12 @@ def _eval_cot(
     total_loss_h = 0.0
     total_loss_kl = 0.0
     total_loss_tokens = 0
+    # Sum of generated-response lengths (in tokens). A row's response length =
+    # ``first_eos + 1`` when <eos> was emitted (counts <eos> itself), else
+    # ``max_target_len`` (the budget cap, model never stopped).
+    total_resp_len_sum = 0
+    total_resp_len_correct_sum = 0
+    total_resp_len_incorrect_sum = 0
     samples_log: list[dict[str, str | bool]] = []
 
     n_edges = (path_len - 1) * deg
@@ -436,9 +442,19 @@ def _eval_cot(
         correct = pred.eq(gt) & valid.unsqueeze(1)                                # (B, path_len)
         seq_ok = correct.all(dim=1) & valid
 
-        correct_g, valid_g, seq_ok_g, eos_emit_g, cot_v_g, cot_g_g = (
+        # Per-row generated-response length: ``first_eos + 1`` when <eos> was
+        # emitted (so the count includes the <eos> token itself), else the
+        # budget cap ``L_gen``.
+        response_len = torch.where(
+            eos_emitted,
+            first_eos + 1,
+            torch.full_like(first_eos, L_gen),
+        )
+
+        correct_g, valid_g, seq_ok_g, eos_emit_g, cot_v_g, cot_g_g, resp_len_g = (
             accelerator.gather_for_metrics(
-                (correct, valid, seq_ok, eos_emitted, cot_chains_valid, cot_ends_at_goal)
+                (correct, valid, seq_ok, eos_emitted, cot_chains_valid,
+                 cot_ends_at_goal, response_len)
             )
         )
         total_correct_per_pos += correct_g.sum(dim=0).cpu().long()
@@ -449,6 +465,11 @@ def _eval_cot(
         total_cot_chains_valid += cot_v_g.sum().item()
         total_cot_ends_at_goal += cot_g_g.sum().item()
         total_seq += correct_g.shape[0]
+        resp_len_g_long = resp_len_g.long().cpu()
+        seq_ok_g_cpu = seq_ok_g.cpu()
+        total_resp_len_sum += int(resp_len_g_long.sum().item())
+        total_resp_len_correct_sum += int(resp_len_g_long[seq_ok_g_cpu].sum().item())
+        total_resp_len_incorrect_sum += int(resp_len_g_long[~seq_ok_g_cpu].sum().item())
 
         # Capture a few decoded samples from the very first batch (main process).
         if (
@@ -503,6 +524,16 @@ def _eval_cot(
         metrics["val/eos_emitted_rate"] = total_eos_emitted / total_seq
         metrics["val/cot_chains_valid_rate"] = total_cot_chains_valid / total_seq
         metrics["val/cot_ends_at_goal_rate"] = total_cot_ends_at_goal / total_seq
+        metrics["val/avg_response_len"] = total_resp_len_sum / total_seq
+        n_incorrect_seq = total_seq - total_correct_seq
+        if total_correct_seq > 0:
+            metrics["val/avg_response_len_correct"] = (
+                total_resp_len_correct_sum / total_correct_seq
+            )
+        if n_incorrect_seq > 0:
+            metrics["val/avg_response_len_incorrect"] = (
+                total_resp_len_incorrect_sum / n_incorrect_seq
+            )
         for j in range(path_len):
             metrics[f"val/sample_token_{j}"] = (
                 total_correct_per_pos[j].item() / max(1, total_per_pos[j].item())
