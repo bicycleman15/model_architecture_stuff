@@ -696,11 +696,31 @@ def main(cfg: DictConfig) -> None:
         # Response lengths for the length penalty + diagnostics. Includes the
         # trailing <eos>; matches ``counts`` computed below from response_mask.
         response_lens = response_mask.float().sum(dim=1)                          # (BG,)
-        rewards, len_factor = _apply_length_penalty(
+        rewards, _ = _apply_length_penalty(
             rewards_raw, response_lens, G,
             alpha=lp_alpha, eps_std=lp_eps_std,
         )
         advantages = _group_advantage(rewards, G, adv_eps, mode=adv_mode).detach()  # (BG,)
+
+        # Per-group statistics of correct-rollout lengths. These are the
+        # quantities the length penalty actually depends on, and they are NOT
+        # tautological: a shrinking ``length_correct_std_mean`` says the model
+        # is converging on a single short solution, and ``length_correct_mu_mean``
+        # tracks the (per-prompt-averaged) length of correct rollouts.
+        with torch.no_grad():
+            B_groups = rewards_raw.shape[0] // G
+            r_grp = rewards_raw.view(B_groups, G)
+            L_grp = response_lens.view(B_groups, G).float()
+            corr_grp = (r_grp > 0.5).float()
+            n_corr_grp = corr_grp.sum(dim=1)                                      # (B,)
+            mu_corr_grp = (
+                (L_grp * corr_grp).sum(dim=1) / n_corr_grp.clamp_min(1.0)
+            )                                                                     # (B,)
+            var_corr_grp = (
+                ((L_grp - mu_corr_grp.unsqueeze(1)) ** 2 * corr_grp).sum(dim=1)
+                / n_corr_grp.clamp_min(1.0)
+            )
+            std_corr_grp = var_corr_grp.clamp_min(0.0).sqrt()                     # (B,)
 
         # --- recompute log-probs under current policy + reference ---
         full_seq = torch.cat([prompt_g, gen_ids], dim=1)                          # (BG, prefix+max_new)
@@ -748,7 +768,9 @@ def main(cfg: DictConfig) -> None:
             rewards_g = accelerator.gather(rewards.detach())
             adv_g = accelerator.gather(advantages.detach())
             counts_g = accelerator.gather(counts.detach())
-            len_factor_g = accelerator.gather(len_factor.detach())
+            n_corr_grp_g = accelerator.gather(n_corr_grp.detach())
+            mu_corr_grp_g = accelerator.gather(mu_corr_grp.detach())
+            std_corr_grp_g = accelerator.gather(std_corr_grp.detach())
             ent_mean = (entropy * mask_f).sum() / mask_f.sum().clamp_min(1.0)
             ent_g = accelerator.gather(ent_mean.detach().unsqueeze(0)).mean()
             kl_mean = kl_per.detach().mean()
@@ -776,12 +798,25 @@ def main(cfg: DictConfig) -> None:
             counts_g[~correct_mask].float().mean().item()
             if n_incorrect > 0 else float("nan")
         )
-        # Mean of f(len) over correct rollouts only (NaN when no correct).
-        # f is identically 0 when alpha == 0 (helper short-circuits).
-        if lp_alpha > 0.0 and n_correct > 0:
-            lp_factor_correct = len_factor_g[correct_mask].float().mean().item()
+        # Per-group correct-length statistics (the actual variables that the
+        # length penalty conditions on). ``mu`` averages per-group mean correct
+        # lengths over groups with >= 1 correct rollout; ``std`` averages
+        # per-group std over groups with >= 2 correct (std is identically 0
+        # with a single correct rollout, so including those would just dilute).
+        has_corr_g = n_corr_grp_g >= 1
+        has_std_g = n_corr_grp_g >= 2
+        if int(has_corr_g.sum().item()) > 0:
+            length_correct_mu_mean = (
+                mu_corr_grp_g[has_corr_g].float().mean().item()
+            )
         else:
-            lp_factor_correct = float("nan")
+            length_correct_mu_mean = float("nan")
+        if int(has_std_g.sum().item()) > 0:
+            length_correct_std_mean = (
+                std_corr_grp_g[has_std_g].float().mean().item()
+            )
+        else:
+            length_correct_std_mean = float("nan")
 
         bar.update(1)
         if accelerator.is_main_process:
@@ -820,8 +855,10 @@ def main(cfg: DictConfig) -> None:
                 payload["train/response_len_correct"] = resp_len_correct
             if n_incorrect > 0:
                 payload["train/response_len_incorrect"] = resp_len_incorrect
-            if lp_alpha > 0.0 and not math.isnan(lp_factor_correct):
-                payload["train/length_penalty_f_mean_correct"] = lp_factor_correct
+            if not math.isnan(length_correct_mu_mean):
+                payload["train/length_correct_mu_mean"] = length_correct_mu_mean
+            if not math.isnan(length_correct_std_mean):
+                payload["train/length_correct_std_mean"] = length_correct_std_mean
             wandb.log(payload, step=global_step)
 
         if eval_every > 0 and (
