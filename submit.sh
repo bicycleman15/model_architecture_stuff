@@ -17,39 +17,13 @@
 ### pretrain vanilla
 
 # WANDB_MODE=offline \
-# accelerate launch \
-# --config-file accelerate.yaml --mixed_precision=bf16 --num_processes=1 \
-# -m next_token.pretrain \
-# logging.project="pretrain-slow-think-fast" \
-# logging.name="vanilla star_5x5_force" \
-# \
-# data.dataset="star_5x5_force" \
-# \
-# model.n_layer=12 \
-# model.dim=512 \
-# model.n_head=8 \
-# model=transformer \
-# \
-# batch_size=512 \
-# schedule.warmup_steps=100 \
-# optimizer.lr=5e-4 \
-# optimizer.min_lr=5e-5 \
-# optimizer.weight_decay=0.1 \
-# schedule.epochs=1 \
-# eval.every_pct=0.2 \
-# eval.log_samples=20 \
-# eval.max_batches=25
-
-### pretrain nextLat
-
-# WANDB_MODE=offline \
 accelerate launch \
 --config-file accelerate.yaml --mixed_precision=bf16 --num_processes=1 \
 -m next_token.pretrain \
 logging.project="pretrain-slow-think-fast" \
-logging.name="nextLat star_5x5_force_5M" \
+logging.name="vanilla lr 5e-4 star_5x5_mixed_3M" \
 \
-data.dataset="star_5x5_force_5M" \
+data.dataset="star_5x5_mixed_3M" \
 \
 model.n_layer=12 \
 model.dim=512 \
@@ -62,14 +36,40 @@ optimizer.lr=5e-4 \
 optimizer.min_lr=5e-5 \
 optimizer.weight_decay=0.1 \
 schedule.epochs=1 \
-eval.every_pct=0.1 \
+eval.every_pct=0.2 \
 eval.log_samples=20 \
-eval.max_batches=128 \
-\
-nextlat.enabled=true \
-nextlat.horizon=30 \
-nextlat.lambda_h=1.0 \
-nextlat.lambda_kl=1.0
+eval.max_batches=25
+
+### pretrain nextLat
+
+# WANDB_MODE=offline \
+# accelerate launch \
+# --config-file accelerate.yaml --mixed_precision=bf16 --num_processes=1 \
+# -m next_token.pretrain \
+# logging.project="pretrain-slow-think-fast" \
+# logging.name="nextLat star_5x5_mixed_3M" \
+# \
+# data.dataset="star_5x5_mixed_3M" \
+# \
+# model.n_layer=12 \
+# model.dim=512 \
+# model.n_head=8 \
+# model=transformer \
+# \
+# batch_size=512 \
+# schedule.warmup_steps=100 \
+# optimizer.lr=1e-3 \
+# optimizer.min_lr=1e-4 \
+# optimizer.weight_decay=0.1 \
+# schedule.epochs=1 \
+# eval.every_pct=0.1 \
+# eval.log_samples=20 \
+# eval.max_batches=25 \
+# \
+# nextlat.enabled=true \
+# nextlat.horizon=30 \
+# nextlat.lambda_h=1.0 \
+# nextlat.lambda_kl=1.0
 
 
 ### post train

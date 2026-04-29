@@ -157,21 +157,29 @@ def star_graph_cot(
     max_backtracks: int | None = None,
     min_depth: int | None = None,
     max_depth: int | None = None,
+    backtrack_weights: list[float] | None = None,
     rng: np.random.Generator | None = None,
 ):
     """Sample one CoT-with-backtracking star-graph instance.
 
     Trace shape (token ids returned in `trace_ids`):
-        [<think>, source, *decoy_1[:d_1], <backtrack>, ...,
-                  source, *decoy_N[:d_N], <backtrack>,
-                  *correct_path, </think>, *correct_path, <eos>]
+        [source, *decoy_1[:d_1], source, *decoy_2[:d_2], ...,
+                  source, *decoy_N[:d_N], *correct_path, <eos>]
 
-    where ``N = n_back ~ Uniform{min_backtracks..max_backtracks}``, the
-    ``n_back`` decoys are sampled uniformly without replacement from the
-    ``deg - 1`` decoys, and per-decoy depths
-    ``d_i ~ Uniform{min_depth..max_depth}``. Every chain segment between
-    ``<think>``/``<backtrack>``/``</think>`` starts at ``source`` so that
-    decoys and the correct path share the same on-graph format.
+    where ``N = n_back`` is sampled over the closed range
+    ``[min_backtracks, max_backtracks]``: uniformly when
+    ``backtrack_weights is None`` (default), or with explicit per-bucket
+    weights ``backtrack_weights`` (any non-negative values; auto-normalised
+    to a probability distribution; must have length
+    ``max_backtracks - min_backtracks + 1``). The ``n_back`` decoys are
+    sampled uniformly without replacement from the ``deg - 1`` decoys, and
+    per-decoy depths are ``d_i ~ Uniform{min_depth..max_depth}``. There are
+    no explicit ``<think>`` / ``</think>`` / ``<backtrack>`` markers: every
+    chain starts by re-emitting ``source``, so a repeated ``source`` token
+    implicitly encodes "dead end, restarting". The correct path itself
+    starts with ``source``, ends at ``goal``, and is followed by ``<eos>``
+    -- so the last ``path_len`` tokens before ``<eos>`` are always the
+    correct path.
 
     Defaults give "various levels": ``max_backtracks = deg - 1`` and
     ``min_depth = max_depth = path_len - 1``.
@@ -181,7 +189,7 @@ def star_graph_cot(
 
     Args:
         tokenizer: must satisfy ``tokenizer.num_nodes == num_nodes``;
-            ``THINK_OPEN`` / ``THINK_CLOSE`` / ``BACKTRACK`` ids are read off it.
+            only ``EOS`` is read off it for the trace.
 
     Returns:
         path:       forward correct path ``[source, a1, ..., goal]``, length ``path_len``.
@@ -215,12 +223,30 @@ def star_graph_cot(
         raise ValueError(
             f"tokenizer.num_nodes ({tokenizer.num_nodes}) != num_nodes ({num_nodes})"
         )
+    n_choices = max_backtracks - min_backtracks + 1
+    if backtrack_weights is not None:
+        if len(backtrack_weights) != n_choices:
+            raise ValueError(
+                f"backtrack_weights length {len(backtrack_weights)} != "
+                f"max_backtracks - min_backtracks + 1 = {n_choices}"
+            )
+        w = np.asarray(backtrack_weights, dtype=np.float64)
+        if (w < 0).any() or w.sum() <= 0:
+            raise ValueError(
+                "backtrack_weights must be non-negative with positive sum, "
+                f"got {list(backtrack_weights)}"
+            )
 
     path, edge_list, source, goal, decoys = _sample_star_graph(
         deg, path_len, num_nodes, rng
     )
 
-    n_back = int(rng.integers(min_backtracks, max_backtracks + 1))
+    if backtrack_weights is None:
+        n_back = int(rng.integers(min_backtracks, max_backtracks + 1))
+    else:
+        w = np.asarray(backtrack_weights, dtype=np.float64)
+        p = w / w.sum()
+        n_back = int(rng.choice(np.arange(min_backtracks, max_backtracks + 1), p=p))
     if n_back > 0:
         chosen_idxs = rng.permutation(len(decoys))[:n_back]
         chosen_decoys = [decoys[i] for i in chosen_idxs]
@@ -228,16 +254,16 @@ def star_graph_cot(
     else:
         chosen_decoys, depths = [], []
 
-    trace_ids: list[int] = [tokenizer.THINK_OPEN]
+    trace_ids: list[int] = []
     for decoy, d in zip(chosen_decoys, depths):
-        # Prepend ``source`` so every exploration chain starts at the same
-        # node as the correct path -- keeps the format of decoy and correct
-        # chains symmetric.
+        # Each exploration chain starts by re-emitting ``source`` -- this
+        # repeated source is the implicit "dead end, restarting" marker
+        # since there is no <backtrack> token in the new format.
         trace_ids.append(source)
         trace_ids.extend(decoy[:d])
-        trace_ids.append(tokenizer.BACKTRACK)
-    trace_ids.extend(path)
-    trace_ids.append(tokenizer.THINK_CLOSE)
+    # ``path`` already starts with ``source`` and ends at ``goal``; the trace
+    # then terminates immediately with <eos>, so the last ``path_len`` tokens
+    # before <eos> are always the correct path.
     trace_ids.extend(path)
     trace_ids.append(tokenizer.EOS)
 
@@ -254,8 +280,9 @@ def format_cot_sample(
     """Render a CoT-with-backtracking instance to ``prefix=trace`` text format.
 
     The prefix encoding matches :func:`format_sample`; the trace is
-    ``tokenizer.decode(trace_ids)`` and so contains the literal tag strings
-    ``<think>`` / ``</think>`` / ``<backtrack>`` separated by commas.
+    ``tokenizer.decode(trace_ids)``. In the current tag-free format, the
+    trace is just node ids separated by commas and terminated with ``<eos>``;
+    chain boundaries are marked implicitly by repeated ``source`` tokens.
     """
     edge_str = "|".join(f"{a},{b}" for a, b in edge_list)
     trace_str = tokenizer.decode(trace_ids)
@@ -442,6 +469,7 @@ def _gen_cot_chunk_bin(args):
         max_backtracks,
         min_depth,
         max_depth,
+        backtrack_weights,
     ) = args
     rng = np.random.default_rng(seed)
     tokenizer = NumeralTokenizer(num_nodes)
@@ -455,6 +483,7 @@ def _gen_cot_chunk_bin(args):
             max_backtracks=max_backtracks,
             min_depth=min_depth,
             max_depth=max_depth,
+            backtrack_weights=backtrack_weights,
             rng=rng,
         )
         prefix_ids = _build_prefix_ids(edges, source, goal, tokenizer)
@@ -560,6 +589,7 @@ def write_cot_samples(
     max_backtracks: int | None = None,
     min_depth: int | None = None,
     max_depth: int | None = None,
+    backtrack_weights: list[float] | None = None,
     seed: int,
     num_workers: int | None = 0,
     chunk_size: int = 50_000,
@@ -569,8 +599,10 @@ def write_cot_samples(
     """Stream-write `n_samples` CoT-with-backtracking lines to `out_path`.
 
     Per-sample randomness:
-      * ``n_back ~ Uniform{min_backtracks..max_backtracks}``
-        (defaults to ``0..deg - 1``).
+      * ``n_back`` ranges over ``[min_backtracks, max_backtracks]``
+        (defaults to ``0..deg - 1``); uniform when ``backtrack_weights`` is
+        ``None``, otherwise sampled with the given (auto-normalised)
+        per-bucket weights.
       * Decoys are sampled uniformly without replacement.
       * Per-decoy depth ``d_i ~ Uniform{min_depth..max_depth}``
         (defaults to ``path_len - 1`` -> always full depth).
@@ -600,6 +632,22 @@ def write_cot_samples(
     if max_depth is None:
         max_depth = path_len - 1
 
+    # Validate weights up-front so we fail fast (the workers would also
+    # validate on every sample, but a clear error here is friendlier).
+    n_back_buckets = max_backtracks - min_backtracks + 1
+    if backtrack_weights is not None:
+        if len(backtrack_weights) != n_back_buckets:
+            raise ValueError(
+                f"backtrack_weights length {len(backtrack_weights)} != "
+                f"max_backtracks - min_backtracks + 1 = {n_back_buckets}"
+            )
+        w = np.asarray(backtrack_weights, dtype=np.float64)
+        if (w < 0).any() or w.sum() <= 0:
+            raise ValueError(
+                "backtrack_weights must be non-negative with positive sum, "
+                f"got {list(backtrack_weights)}"
+            )
+
     n_workers = _resolve_workers(num_workers)
     n_chunks = max(1, (n_samples + chunk_size - 1) // chunk_size)
     sizes = _split_n(n_samples, n_chunks)
@@ -608,6 +656,7 @@ def write_cot_samples(
         (
             seeds[i], sizes[i], deg, path_len, num_nodes,
             min_backtracks, max_backtracks, min_depth, max_depth,
+            backtrack_weights,
         )
         for i in range(n_chunks)
     ]
@@ -664,7 +713,15 @@ def write_cot_samples(
     np.cumsum(all_lens, dtype=np.int64, out=idx[1:])
     idx.tofile(idx_path)
 
-    upper_bound = 2 + max_backtracks * (max_depth + 2) + 2 * path_len + 1
+    # Tag-free format: trace = N decoy chains (each: source + up to max_depth
+    # decoy tokens) + correct path (length path_len, already includes source)
+    # + <eos>.
+    upper_bound = max_backtracks * (max_depth + 1) + path_len + 1
+    if backtrack_weights is None:
+        weights_meta: list[float] | None = None
+    else:
+        w = np.asarray(backtrack_weights, dtype=np.float64)
+        weights_meta = (w / w.sum()).round(6).tolist()
     meta = {
         "deg": deg,
         "path_len": path_len,
@@ -674,6 +731,7 @@ def write_cot_samples(
             "max_backtracks": max_backtracks,
             "min_depth": min_depth,
             "max_depth": max_depth,
+            "backtrack_weights": weights_meta,
         },
         "max_target_len": upper_bound,
         "bin_dtype": "uint16",

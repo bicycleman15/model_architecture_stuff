@@ -226,24 +226,27 @@ def _compute_rewards(
     gen_ids: torch.Tensor,
     gt_paths: torch.Tensor,
     *,
-    think_close_id: int,
+    eos_id: int,
     path_len: int,
 ) -> torch.Tensor:
     """Sparse 0/1 reward per rollout, vectorized across the batch.
 
-    For each row, find the first ``</think>``; the next ``path_len`` tokens are
-    the predicted answer. Reward = 1.0 iff the predicted path matches
-    ``gt_paths`` exactly. If ``</think>`` is missing or the answer slice would
-    overflow, reward = 0.0.
+    Tag-free CoT format: each rollout ends with ``..., correct_path, <eos>``.
+    For each row, find the first ``<eos>``; the ``path_len`` tokens *ending
+    at* ``<eos>`` are the predicted answer. Reward = 1.0 iff the predicted
+    path matches ``gt_paths`` exactly. If no ``<eos>`` was emitted or it
+    landed within the first ``path_len`` tokens, reward = 0.0.
     """
     BG, L = gen_ids.shape
     device = gen_ids.device
     pos = torch.arange(L, device=device).unsqueeze(0).expand(BG, -1)
     big = torch.full_like(pos, L + 1)
-    is_close = gen_ids == think_close_id
-    first_close = torch.where(is_close, pos, big).min(dim=1).values
-    valid = (first_close + path_len) < L
-    start = (first_close + 1).clamp_max(max(0, L - path_len))
+    is_eos = gen_ids == eos_id
+    first_eos = torch.where(is_eos, pos, big).min(dim=1).values                 # (BG,)
+    eos_emitted = first_eos < L + 1
+    valid = eos_emitted & (first_eos >= path_len)
+    end = first_eos.clamp_max(L)
+    start = (end - path_len).clamp_min(0)
     ar = torch.arange(path_len, device=device).unsqueeze(0)
     idx = start.unsqueeze(1) + ar
     pred = gen_ids.gather(1, idx)
@@ -583,9 +586,6 @@ def main(cfg: DictConfig) -> None:
         wandb.run.summary["advantage_mode"] = adv_mode
         wandb.run.summary["length_penalty_alpha"] = lp_alpha
     eos_id = tokenizer.EOS
-    think_close_id = tokenizer.THINK_CLOSE
-    think_open_id = tokenizer.THINK_OPEN
-    backtrack_id = tokenizer.BACKTRACK
     autocast_ctx = accelerator.autocast
 
     def run_eval(step: int) -> None:
@@ -599,9 +599,6 @@ def main(cfg: DictConfig) -> None:
             deg=deg,
             max_target_len=max_target_len,
             pad_id=pad_id,
-            think_open_id=think_open_id,
-            think_close_id=think_close_id,
-            backtrack_id=backtrack_id,
             eos_id=eos_id,
             temperature=float(cfg.eval.temperature),
             top_k=cfg.eval.get("top_k", None),
@@ -620,21 +617,21 @@ def main(cfg: DictConfig) -> None:
                 f"[eval @ step {step}/{total_steps}] "
                 f"forced_loss={metrics.get('val/forced_loss', float('nan')):.4f} "
                 f"sample_seq={metrics.get('val/sample_seq_acc', float('nan')):.4f} "
-                f"no_close={metrics.get('val/no_think_close_rate', float('nan')):.3f} "
-                f"eos_pos={metrics.get('val/eos_correct_pos_rate', float('nan')):.3f} "
+                f"no_path={metrics.get('val/no_complete_path_rate', float('nan')):.3f} "
+                f"eos_emit={metrics.get('val/eos_emitted_rate', float('nan')):.3f} "
                 f"cot_valid={metrics.get('val/cot_chains_valid_rate', float('nan')):.3f} "
                 f"cot_goal={metrics.get('val/cot_ends_at_goal_rate', float('nan')):.3f} "
                 f"{tok_str}"
             )
             for k, s in enumerate(samples_log):
                 log.info(
-                    "  sample[%d] correct=%s eos_ok=%s cot_valid=%s cot_goal=%s\n"
+                    "  sample[%d] correct=%s eos_emitted=%s cot_valid=%s cot_goal=%s\n"
                     "    prefix:    %s\n"
                     "    gt_trace:  %s\n"
                     "    gen:       %s\n"
                     "    gt_path:   %s\n"
                     "    pred_path: %s",
-                    k, s["correct"], s["eos_ok"], s["cot_valid"], s["cot_ends_at_goal"],
+                    k, s["correct"], s["eos_emitted"], s["cot_valid"], s["cot_ends_at_goal"],
                     s["prefix"], s["gt_trace"], s["gen"], s["gt_path"], s["pred_path"],
                 )
             if cfg.logging.wandb:
@@ -691,7 +688,7 @@ def main(cfg: DictConfig) -> None:
         # --- reward + (optional) length-penalty + group advantage ---
         rewards_raw = _compute_rewards(
             gen_ids, gt_paths_g,
-            think_close_id=think_close_id, path_len=path_len,
+            eos_id=eos_id, path_len=path_len,
         )                                                                         # (BG,)
         # Response lengths for the length penalty + diagnostics. Includes the
         # trailing <eos>; matches ``counts`` computed below from response_mask.

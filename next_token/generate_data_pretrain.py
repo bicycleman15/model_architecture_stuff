@@ -1,16 +1,18 @@
 """CLI to generate CoT-with-backtracking pre-training datasets for star graph.
 
-Each line is ``prefix=trace`` where ``trace`` is::
+Each line is ``prefix=trace`` where ``trace`` is the *tag-free* CoT format::
 
-    <think> decoy_1 <backtrack> ... decoy_N <backtrack> correct_path </think> correct_path
+    source decoy_1 source decoy_2 ... source decoy_N correct_path <eos>
 
 with ``N = n_back ~ Uniform{min_backtracks..max_backtracks}`` (defaults
 ``0..deg-1``) decoys sampled uniformly without replacement from the
 ``deg-1`` decoys, and per-decoy depths
-``d_i ~ Uniform{min_depth..max_depth}`` (defaults to ``path_len-1``).
-The correct path is always forward (``source -> ... -> goal``) and
-appears twice: once as the final reasoning step inside
-``<think>...</think>``, and once as the answer after ``</think>``.
+``d_i ~ Uniform{min_depth..max_depth}`` (defaults to ``path_len-1``). The
+correct path is always forward (``source -> ... -> goal``), appears once at
+the end of the trace, and is followed by ``<eos>``. Each chain (including
+the correct one) starts by re-emitting ``source``; the repeated ``source``
+token is the implicit "dead end, restart" cue and replaces the previous
+``<think>``/``</think>``/``<backtrack>`` markers.
 
 Files are written to::
 
@@ -37,6 +39,13 @@ python -m next_token.generate_data_pretrain \
 --n_train=5_000_000 --n_test=200_000 \
 --num_workers=16 --name=star_5x5_force_5M --min_backtracks=0 --max_backtracks=0
 
+python -m next_token.generate_data_pretrain \
+--deg=5 --path_len=5 --num_nodes=100 \
+--n_train=3_000_000 --n_test=20_000 --num_workers=16 \
+--name=star_5x5_mixed_3M \
+--min_backtracks=0 --max_backtracks=4 \
+--backtrack_weights=0.7,0.1,0.1,0.05,0.05 --overwrite
+
     # custom name (referenced as data.dataset=star_50M in pretrain.yaml)
     python -m next_token.generate_data_pretrain --deg=5 --path_len=5 --num_nodes=100 \
         --n_train=50_000_000 --n_test=20_000 --num_workers=16 \
@@ -46,6 +55,13 @@ python -m next_token.generate_data_pretrain \
     python -m next_token.generate_data_pretrain --deg=5 --path_len=5 --num_nodes=50 \
         --n_train=2000000 --n_test=20000 \
         --min_backtracks=1 --max_backtracks=2 --min_depth=2 --max_depth=4
+
+    # non-uniform n_back distribution: 50/25/15/5/5 over 0..4 backtracks.
+    # Weights are auto-normalised; pass any non-negative floats.
+    python -m next_token.generate_data_pretrain --deg=5 --path_len=5 --num_nodes=100 \
+        --n_train=1_000_000 --n_test=20_000 --num_workers=16 --name=star_5x5_mixed \
+        --min_backtracks=0 --max_backtracks=4 \
+        --backtrack_weights=0.5,0.25,0.15,0.05,0.05
 """
 
 from __future__ import annotations
@@ -84,6 +100,7 @@ def main(
     max_backtracks: int | None = None,
     min_depth: int | None = None,
     max_depth: int | None = None,
+    backtrack_weights: str | None = None,
     num_workers: int = 0,
     chunk_size: int = 50_000,
     name: str | None = None,
@@ -94,6 +111,15 @@ def main(
         min_depth = path_len - 1
     if max_depth is None:
         max_depth = path_len - 1
+
+    weights: list[float] | None = None
+    if backtrack_weights is not None:
+        # Accept either a comma-separated string ("0.5,0.25,...") or a Python
+        # list/tuple if Fire happened to parse it as one.
+        if isinstance(backtrack_weights, (list, tuple)):
+            weights = [float(x) for x in backtrack_weights]
+        else:
+            weights = [float(x) for x in str(backtrack_weights).split(",") if x.strip()]
 
     dirname = name or dataset_dirname_pretrain(
         deg, path_len, num_nodes,
@@ -114,12 +140,14 @@ def main(
         f"(name={dirname}, deg={deg}, path_len={path_len}, num_nodes={num_nodes}, "
         f"min_backtracks={min_backtracks}, max_backtracks={max_backtracks}, "
         f"min_depth={min_depth}, max_depth={max_depth}, "
+        f"backtrack_weights={weights}, "
         f"num_workers={num_workers}, chunk_size={chunk_size})"
     )
     write_cot_samples(
         train_path, n_train, deg, path_len, num_nodes,
         min_backtracks=min_backtracks, max_backtracks=max_backtracks,
         min_depth=min_depth, max_depth=max_depth,
+        backtrack_weights=weights,
         seed=seed,
         num_workers=num_workers, chunk_size=chunk_size,
         desc="train",
@@ -129,6 +157,7 @@ def main(
         test_path, n_test, deg, path_len, num_nodes,
         min_backtracks=min_backtracks, max_backtracks=max_backtracks,
         min_depth=min_depth, max_depth=max_depth,
+        backtrack_weights=weights,
         seed=seed + 1,
         num_workers=num_workers, chunk_size=chunk_size,
         desc="test",

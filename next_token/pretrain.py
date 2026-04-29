@@ -217,17 +217,16 @@ def _check_cot_chains(
     prefix_row: torch.Tensor,
     *,
     n_edges: int,
-    think_open_id: int,
-    think_close_id: int,
-    backtrack_id: int,
+    eos_id: int,
 ) -> tuple[bool, bool]:
-    """Validate the ``<think> ... </think>`` region against the star graph.
+    """Validate the tag-free CoT trace against the star graph.
 
     Returns ``(chains_valid, ends_at_goal)`` for a single sequence:
 
-    * ``chains_valid``: every chain segment (delimited by ``<think>``,
-      ``<backtrack>``, ``</think>``) is a valid path starting from ``source``
-      following directed edges of the graph.
+    * ``chains_valid``: every chain segment is a valid path starting from
+      ``source`` and following directed edges of the graph. Chains are
+      delimited implicitly by ``source``: each chain begins with ``source``,
+      and the next ``source`` token starts the next chain.
     * ``ends_at_goal``: ``chains_valid`` AND the final segment terminates at
       ``goal``.
 
@@ -235,10 +234,10 @@ def _check_cot_chains(
     ``source = prefix[-3]`` and ``goal = prefix[-2]``. The ``i``-th edge sits
     at ``(prefix[3*i], prefix[3*i+1])``.
 
-    Note: the training format is asymmetric -- decoy chains exclude ``source``
-    while the correct chain (the one immediately before ``</think>``) includes
-    it as the first token. We strip a leading ``source`` from each segment
-    before walking, so both formats validate identically.
+    Bare-``source`` segments (a chain that immediately resets without taking
+    a step, possible when ``min_depth == 0``) are accepted as valid no-ops;
+    only the final segment needs to be non-empty and end at goal for
+    ``ends_at_goal`` to be true.
     """
     edges = [
         (int(prefix_row[3 * i].item()), int(prefix_row[3 * i + 1].item()))
@@ -256,42 +255,44 @@ def _check_cot_chains(
             adj[a] = b
 
     L = gen_row.size(0)
-    if L == 0 or int(gen_row[0].item()) != think_open_id:
+    if L == 0:
         return False, False
-    close_pos = -1
-    for i in range(1, L):
-        if int(gen_row[i].item()) == think_close_id:
-            close_pos = i
+
+    # Trim at first <eos>.
+    end = L
+    for i in range(L):
+        if int(gen_row[i].item()) == eos_id:
+            end = i
             break
-    if close_pos < 0:
+    if end == 0:
+        return False, False
+    trace = gen_row[:end].tolist()
+
+    # Trace must start with source.
+    if trace[0] != source:
         return False, False
 
-    inside = gen_row[1:close_pos].tolist()
+    # Split at every source occurrence; each chain runs [source ... -> next source).
+    src_positions = [i for i, t in enumerate(trace) if t == source]
     segments: list[list[int]] = []
-    cur: list[int] = []
-    for t in inside:
-        if t == backtrack_id:
-            segments.append(cur)
-            cur = []
-        else:
-            cur.append(t)
-    segments.append(cur)
+    for k, a in enumerate(src_positions):
+        b = src_positions[k + 1] if k + 1 < len(src_positions) else len(trace)
+        segments.append(trace[a:b])
 
-    last_seg_stripped: list[int] = []
+    last_tail: list[int] = []
     for k, seg in enumerate(segments):
-        if seg and seg[0] == source:
-            seg = seg[1:]
-        if not seg:
-            return False, False
-        if seg[0] not in src_nbrs:
-            return False, False
-        for a, b in zip(seg, seg[1:]):
-            if adj.get(a) != b:
+        # Strip the leading source for edge-walk; bare-source chains are no-ops.
+        body = seg[1:]
+        if body:
+            if body[0] not in src_nbrs:
                 return False, False
+            for a, b in zip(body, body[1:]):
+                if adj.get(a) != b:
+                    return False, False
         if k == len(segments) - 1:
-            last_seg_stripped = seg
+            last_tail = body
 
-    ends_at_goal = bool(last_seg_stripped) and last_seg_stripped[-1] == goal
+    ends_at_goal = bool(last_tail) and last_tail[-1] == goal
     return True, ends_at_goal
 
 
@@ -306,9 +307,6 @@ def _eval_cot(
     deg: int,
     max_target_len: int,
     pad_id: int,
-    think_open_id: int,
-    think_close_id: int,
-    backtrack_id: int,
     eos_id: int,
     temperature: float,
     top_k: int | None,
@@ -319,20 +317,22 @@ def _eval_cot(
 ) -> tuple[dict[str, float], list[dict[str, str | bool]]]:
     """Sampling-based eval + teacher-forced loss diagnostic.
 
-    For each test row:
+    Tag-free CoT format: the trace ends with ``..., correct_path, <eos>``,
+    so for each test row:
       1. Take the prefix tokens (everything up to and including ``=``).
-      2. AR-sample `max_target_len` tokens with temperature.
-      3. Find first ``</think>`` in the generated tokens; the next `path_len`
-         tokens are the predicted answer. Otherwise mark wrong.
-      4. GT answer = ``full_ids[length - path_len : length]`` (last
-         `path_len` un-padded tokens; by construction the second copy of the
-         correct path).
+      2. AR-sample ``max_target_len`` tokens with temperature.
+      3. Find the first ``<eos>`` in the generated tokens; the ``path_len``
+         tokens *ending at* ``<eos>`` are the predicted answer. If no
+         ``<eos>`` was emitted or it lands within the first ``path_len``
+         tokens, mark the row as not-extractable.
+      4. GT answer = last un-padded ``path_len`` tokens before the trailing
+         ``<eos>`` of the saved trace.
     """
     model.eval()
     total_correct_seq = 0
     total_seq = 0
-    total_no_close = 0
-    total_eos_ok = 0
+    total_no_complete = 0
+    total_eos_emitted = 0
     total_cot_chains_valid = 0
     total_cot_ends_at_goal = 0
     total_correct_per_pos = torch.zeros(path_len, dtype=torch.long)
@@ -378,9 +378,10 @@ def _eval_cot(
         )
 
         # Per-row early-stop on <eos>: once a row emits EOS, the EOS itself is
-        # kept (so `eos_ok` works) but subsequent positions are filled with
-        # ``pad_id``. We also break out of the loop entirely once every row in
-        # the batch is done, which saves model forwards on later positions.
+        # kept (so eos-anchored extraction still works) but subsequent
+        # positions are filled with ``pad_id``. We also break out of the loop
+        # entirely once every row in the batch is done, which saves model
+        # forwards on later positions.
         done = torch.zeros(B, dtype=torch.bool, device=device)
         for t in range(max_target_len):
             with accelerator.autocast():
@@ -393,43 +394,41 @@ def _eval_cot(
                 break
 
         gen = seq[:, prefix_len:]                                                # (B, max_target_len)
+        L_gen = gen.size(1)
 
         # GT path: the `path_len` tokens immediately before the trailing
-        # `<eos>` (the trace is ``..., correct_path, <eos>`` so they live at
-        # ``[length - path_len - 1 : length - 1]``).
+        # `<eos>` of the *saved* trace (length includes the trailing <eos>,
+        # so they live at ``[length - path_len - 1 : length - 1]``).
         ar = torch.arange(path_len, device=device)
-        gather_idx = (lengths_d.unsqueeze(1) - path_len - 1 + ar).clamp_min(0)     # (B, path_len)
-        gt = full_ids_d.gather(1, gather_idx)                                      # (B, path_len)
+        gather_idx = (lengths_d.unsqueeze(1) - path_len - 1 + ar).clamp_min(0)    # (B, path_len)
+        gt = full_ids_d.gather(1, gather_idx)                                     # (B, path_len)
 
-        # Predicted path: next path_len tokens after the first </think> in gen.
-        # eos_ok: token immediately after that path slice is `<eos>`.
-        pred = torch.full((B, path_len), pad_id, dtype=torch.long, device=device)
-        valid = torch.zeros(B, dtype=torch.bool, device=device)
-        eos_ok = torch.zeros(B, dtype=torch.bool, device=device)
+        # Predicted path: `path_len` tokens *ending at* the first <eos> in gen.
+        # ``valid`` = a complete path could be extracted (eos appeared at
+        # position >= path_len). ``eos_emitted`` = eos was emitted at all.
+        pos = torch.arange(L_gen, device=device).unsqueeze(0).expand(B, -1)
+        big = torch.full_like(pos, L_gen + 1)
+        is_eos = gen == eos_id
+        first_eos = torch.where(is_eos, pos, big).min(dim=1).values               # (B,)
+        eos_emitted = first_eos < L_gen + 1
+        valid = eos_emitted & (first_eos >= path_len)
+        end = first_eos.clamp_max(L_gen)
+        start = (end - path_len).clamp_min(0)
+        pred_idx = start.unsqueeze(1) + ar
+        pred = gen.gather(1, pred_idx)                                            # (B, path_len)
+        # Where not valid, the slice is meaningless; gate on ``valid`` below.
+
+        # Per-row CoT-chain validation (still needs Python-side graph parsing).
         cot_chains_valid = torch.zeros(B, dtype=torch.bool, device=device)
         cot_ends_at_goal = torch.zeros(B, dtype=torch.bool, device=device)
-        L_gen = gen.size(1)
         gen_cpu_inner = gen.cpu()
         prefix_cpu_inner = full_ids_d[:, :prefix_len].cpu()
         for b in range(B):
-            row = gen[b]
-            close_pos = (row == think_close_id).nonzero(as_tuple=False)
-            if close_pos.numel() != 0:
-                start = int(close_pos[0].item()) + 1
-                end = start + path_len
-                if end <= L_gen:
-                    pred[b] = row[start:end]
-                    valid[b] = True
-                    if end < L_gen and row[end].item() == eos_id:
-                        eos_ok[b] = True
-
             chains_ok, goal_ok = _check_cot_chains(
                 gen_cpu_inner[b],
                 prefix_cpu_inner[b],
                 n_edges=n_edges,
-                think_open_id=think_open_id,
-                think_close_id=think_close_id,
-                backtrack_id=backtrack_id,
+                eos_id=eos_id,
             )
             cot_chains_valid[b] = chains_ok
             cot_ends_at_goal[b] = goal_ok
@@ -437,16 +436,16 @@ def _eval_cot(
         correct = pred.eq(gt) & valid.unsqueeze(1)                                # (B, path_len)
         seq_ok = correct.all(dim=1) & valid
 
-        correct_g, valid_g, seq_ok_g, eos_ok_g, cot_v_g, cot_g_g = (
+        correct_g, valid_g, seq_ok_g, eos_emit_g, cot_v_g, cot_g_g = (
             accelerator.gather_for_metrics(
-                (correct, valid, seq_ok, eos_ok, cot_chains_valid, cot_ends_at_goal)
+                (correct, valid, seq_ok, eos_emitted, cot_chains_valid, cot_ends_at_goal)
             )
         )
         total_correct_per_pos += correct_g.sum(dim=0).cpu().long()
         total_per_pos += correct_g.shape[0]
         total_correct_seq += seq_ok_g.sum().item()
-        total_no_close += (~valid_g).sum().item()
-        total_eos_ok += eos_ok_g.sum().item()
+        total_no_complete += (~valid_g).sum().item()
+        total_eos_emitted += eos_emit_g.sum().item()
         total_cot_chains_valid += cot_v_g.sum().item()
         total_cot_ends_at_goal += cot_g_g.sum().item()
         total_seq += correct_g.shape[0]
@@ -466,7 +465,7 @@ def _eval_cot(
             gt_cpu = gt.cpu()
             valid_cpu = valid.cpu()
             seq_ok_cpu = seq_ok.cpu()
-            eos_ok_cpu = eos_ok.cpu()
+            eos_emit_cpu = eos_emitted.cpu()
             cot_v_cpu = cot_chains_valid.cpu()
             cot_g_cpu = cot_ends_at_goal.cpu()
             for b in range(n_log):
@@ -478,7 +477,7 @@ def _eval_cot(
                 pred_path_str = (
                     tokenizer.decode(pred_cpu[b].tolist())
                     if bool(valid_cpu[b].item())
-                    else "<no </think>>"
+                    else "<no complete path>"
                 )
                 samples_log.append(
                     {
@@ -488,7 +487,7 @@ def _eval_cot(
                         "gt_path": gt_path_str,
                         "pred_path": pred_path_str,
                         "correct": bool(seq_ok_cpu[b].item()),
-                        "eos_ok": bool(eos_ok_cpu[b].item()),
+                        "eos_emitted": bool(eos_emit_cpu[b].item()),
                         "cot_valid": bool(cot_v_cpu[b].item()),
                         "cot_ends_at_goal": bool(cot_g_cpu[b].item()),
                     }
@@ -497,8 +496,11 @@ def _eval_cot(
     metrics: dict[str, float] = {}
     if total_seq > 0:
         metrics["val/sample_seq_acc"] = total_correct_seq / total_seq
-        metrics["val/no_think_close_rate"] = total_no_close / total_seq
-        metrics["val/eos_correct_pos_rate"] = total_eos_ok / total_seq
+        # No <eos> emitted, OR <eos> emitted within first ``path_len`` tokens
+        # so we cannot extract a complete predicted path.
+        metrics["val/no_complete_path_rate"] = total_no_complete / total_seq
+        # <eos> emitted at all (regardless of position).
+        metrics["val/eos_emitted_rate"] = total_eos_emitted / total_seq
         metrics["val/cot_chains_valid_rate"] = total_cot_chains_valid / total_seq
         metrics["val/cot_ends_at_goal_rate"] = total_cot_ends_at_goal / total_seq
         for j in range(path_len):
@@ -702,9 +704,6 @@ def main(cfg: DictConfig) -> None:
             deg=deg,
             max_target_len=max_target_len,
             pad_id=tokenizer.DUMMY,
-            think_open_id=tokenizer.THINK_OPEN,
-            think_close_id=tokenizer.THINK_CLOSE,
-            backtrack_id=tokenizer.BACKTRACK,
             eos_id=tokenizer.EOS,
             temperature=float(cfg.eval.temperature),
             top_k=cfg.eval.get("top_k", None),
@@ -727,21 +726,21 @@ def main(cfg: DictConfig) -> None:
                 f"train_loss={mean_window_loss:.4f} "
                 f"forced_loss={metrics.get('val/forced_loss', float('nan')):.4f} "
                 f"sample_seq={metrics.get('val/sample_seq_acc', float('nan')):.4f} "
-                f"no_close={metrics.get('val/no_think_close_rate', float('nan')):.3f} "
-                f"eos_pos={metrics.get('val/eos_correct_pos_rate', float('nan')):.3f} "
+                f"no_path={metrics.get('val/no_complete_path_rate', float('nan')):.3f} "
+                f"eos_emit={metrics.get('val/eos_emitted_rate', float('nan')):.3f} "
                 f"cot_valid={metrics.get('val/cot_chains_valid_rate', float('nan')):.3f} "
                 f"cot_goal={metrics.get('val/cot_ends_at_goal_rate', float('nan')):.3f} "
                 f"{tok_str}"
             )
             for k, s in enumerate(samples_log):
                 log.info(
-                    "  sample[%d] correct=%s eos_ok=%s cot_valid=%s cot_goal=%s\n"
+                    "  sample[%d] correct=%s eos_emitted=%s cot_valid=%s cot_goal=%s\n"
                     "    prefix:    %s\n"
                     "    gt_trace:  %s\n"
                     "    gen:       %s\n"
                     "    gt_path:   %s\n"
                     "    pred_path: %s",
-                    k, s["correct"], s["eos_ok"], s["cot_valid"], s["cot_ends_at_goal"],
+                    k, s["correct"], s["eos_emitted"], s["cot_valid"], s["cot_ends_at_goal"],
                     s["prefix"], s["gt_trace"], s["gen"], s["gt_path"], s["pred_path"],
                 )
             if cfg.logging.wandb:
@@ -749,14 +748,14 @@ def main(cfg: DictConfig) -> None:
                 if samples_log:
                     table = wandb.Table(
                         columns=[
-                            "step", "idx", "correct", "eos_ok",
+                            "step", "idx", "correct", "eos_emitted",
                             "cot_valid", "cot_ends_at_goal",
                             "gt_path", "pred_path", "gen", "gt_trace",
                         ]
                     )
                     for k, s in enumerate(samples_log):
                         table.add_data(
-                            step, k, s["correct"], s["eos_ok"],
+                            step, k, s["correct"], s["eos_emitted"],
                             s["cot_valid"], s["cot_ends_at_goal"],
                             s["gt_path"], s["pred_path"], s["gen"], s["gt_trace"],
                         )
